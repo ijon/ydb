@@ -35,20 +35,6 @@ class TMessageBusServerSchemeRequest : public TMessageBusSecureRequest<TMessageB
     void FillStatus(EResponseStatus status, const NKikimrTxUserProxy::TEvProposeTransactionStatus &result, TBusResponse* response)
     {
         response->Record.SetStatus(status);
-        if (result.HasPathId()) {
-            response->Record.MutableFlatTxId()->SetPathId(result.GetPathId());
-        }
-
-        if (result.HasPathCreateTxId()) {
-            response->Record.MutableFlatTxId()->SetTxId(result.GetPathCreateTxId());
-        } else if (result.HasPathDropTxId()) {
-            response->Record.MutableFlatTxId()->SetTxId(result.GetPathDropTxId());
-        } else if (result.HasTxId()) {
-            response->Record.MutableFlatTxId()->SetTxId(result.GetTxId());
-        }
-
-        if (result.HasSchemeShardTabletId())
-            response->Record.MutableFlatTxId()->SetSchemeShardTabletId(result.GetSchemeShardTabletId());
 
         if (result.HasSchemeShardReason()) {
             response->Record.SetErrorReason(result.GetSchemeShardReason());
@@ -153,62 +139,6 @@ void TMessageBusServerSchemeRequest<TBusPersQueue>::ReplyWithResult(EResponseSta
     Die(ctx);
 }
 
-template <>
-void TMessageBusServerSchemeRequest<TBusSchemeOperation>::SendProposeRequest(const TActorContext &ctx) {
-    TAutoPtr<TEvTxUserProxy::TEvProposeTransaction> req(new TEvTxUserProxy::TEvProposeTransaction());
-    NKikimrTxUserProxy::TEvProposeTransaction &record = req->Record;
-
-    if (!Request->Record.HasTransaction()) {
-        return HandleError(MSTATUS_ERROR, TEvTxUserProxy::TResultStatus::Unknown, "Malformed request: no modify scheme transaction provided", ctx);
-    }
-
-    if (!Request->Record.GetTransaction().HasModifyScheme()) {
-        return HandleError(MSTATUS_ERROR, TEvTxUserProxy::TResultStatus::Unknown, "Malformed request: no modify scheme request body provided", ctx);
-    }
-
-    bool needAdminCheck = false;
-    switch (Request->Record.GetTransaction().GetModifyScheme().GetOperationType()) {
-        case NKikimrSchemeOp::ESchemeOpSplitMergeTablePartitions:
-            needAdminCheck = true;
-            break;
-        default:
-            break;
-    }
-
-    const auto& allowedSIDs(AppData(ctx)->AdministrationAllowedSIDs);
-
-    if (needAdminCheck) {
-        if (allowedSIDs.empty()) {
-            needAdminCheck = false;
-        }
-    }
-
-    if (needAdminCheck) {
-        if (!TBase::IsUserAdmin()) {
-            return TBase::HandleError(
-                        EResponseStatus::MSTATUS_ERROR,
-                        TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::AccessDenied,
-                        "Access denied",
-                        ctx);
-        }
-    }
-
-    record.MutableTransaction()->MutableModifyScheme()->MergeFrom(Request->Record.GetTransaction().GetModifyScheme());
-    req->Record.SetUserToken(TBase::GetSerializedToken());
-    ctx.Send(MakeTxProxyID(), req.Release());
-}
-
-template <>
-void TMessageBusServerSchemeRequest<TBusSchemeOperation>::ReplyWithResult(EResponseStatus status, const NKikimrTxUserProxy::TEvProposeTransactionStatus &result, const TActorContext &ctx) {
-    TAutoPtr<TBusResponse> response(new TBusResponse());
-
-    FillStatus(status, result, response.Get());
-
-    SendReplyAutoPtr(response);
-    Request.Destroy();
-    Die(ctx);
-}
-
 void TMessageBusServerProxy::Handle(TEvBusProxy::TEvPersQueue::TPtr& ev, const TActorContext& ctx) {
     LOG_TRACE_S(ctx, NKikimrServices::PERSQUEUE, "TMessageBusServerProxy::Handle");
 
@@ -225,10 +155,6 @@ void TMessageBusServerProxy::Handle(TEvBusProxy::TEvPersQueue::TPtr& ev, const T
     LOG_TRACE_S(ctx, NKikimrServices::PERSQUEUE, "TMessageBusServerProxy::Handle CreateMessageBusServerPersQueue");
 
     ctx.Register(CreateMessageBusServerPersQueue(msg->MsgContext, PqMetaCache));
-}
-
-void TMessageBusServerProxy::Handle(TEvBusProxy::TEvFlatTxRequest::TPtr& ev, const TActorContext& ctx) {
-    ctx.Register(new TMessageBusServerSchemeRequest<TBusSchemeOperation>(ev->Get()));
 }
 
 }

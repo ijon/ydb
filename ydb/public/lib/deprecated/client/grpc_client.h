@@ -49,10 +49,6 @@ namespace NKikimr {
             // Stream request
             void StreamRequest(const NKikimrClient::TRequest& request, TSimpleCallback<NKikimrClient::TResponse> process, TFinishCallback finish);
 
-            // DML transactions
-            void SchemeOperation(const NKikimrClient::TSchemeOperation& request, TResponseCallback callback);
-            // status polling for scheme transactions
-            void SchemeOperationStatus(const NKikimrClient::TSchemeOperationStatus& request, TResponseCallback callback);
             // describe
             void SchemeDescribe(const NKikimrClient::TSchemeDescribe& request, TResponseCallback callback);
 

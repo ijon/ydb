@@ -96,7 +96,7 @@ message DescribePathRequest {
 }
 
 message DescribePathResponse {
-    // Holds DescribePathResult in case of DescribePathResult
+    // Holds DescribePathResult in case of successful call
     Ydb.Operations.Operation operation = 1;
 }
 
@@ -130,5 +130,20 @@ message ModifyPermissionsRequest {
 }
 
 message ModifyPermissionsResponse {
+    Ydb.Operations.Operation operation = 1;
+}
+
+message ModifySchemeRequest {
+    Ydb.Operations.OperationParams operation_params = 1;
+    repeated bytes modify_schemes = 2;
+}
+
+message ModifySchemeResult {
+    // Transaction identifier
+    string tx_id = 1;
+}
+
+message ModifySchemeResponse {
+    // Holds ModifySchemeResult in case of successful call
     Ydb.Operations.Operation operation = 1;
 }

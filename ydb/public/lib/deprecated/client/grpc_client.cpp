@@ -317,8 +317,6 @@ namespace NKikimr {
         }
 
         IMPL_REQUEST(Request, TRequest, TResponse)
-        IMPL_REQUEST(SchemeOperation, TSchemeOperation, TResponse)
-        IMPL_REQUEST(SchemeOperationStatus, TSchemeOperationStatus, TResponse)
         IMPL_REQUEST(SchemeDescribe, TSchemeDescribe, TResponse)
         IMPL_REQUEST(PersQueueRequest, TPersQueueRequest, TResponse)
         IMPL_REQUEST(SchemeInitRoot, TSchemeInitRoot, TResponse)

@@ -77,12 +77,6 @@ TSchemaObject::TSchemaObject(TKikimr& kikimr, const TString& path, const TString
     static_assert((ui32)NKikimrSchemeOp::EPathTypeSubDomain == (ui32)EPathType::SubDomain, "EPathType::SubDomain");
 }
 
-void TSchemaObject::ModifySchema(const TModifyScheme& schema) {
-    NThreading::TFuture<TResult> future = Kikimr.ModifySchema(schema);
-    TResult result = future.GetValue(TDuration::Max());
-    result.GetError().Throw();
-}
-
 void TSchemaObject::Drop() {
     TModifyScheme drop;
     switch (PathType) {
@@ -143,41 +137,7 @@ void TSchemaObject::Drop() {
 
     drop.SetWorkingDir(Path);
     drop.MutableDrop()->SetId(PathId);
-    ModifySchema(drop);
-}
-
-TSchemaObject TSchemaObject::MakeDirectory(const TString& name) {
-    NThreading::TFuture<TResult> future = Kikimr.MakeDirectory(*this, name);
-    TResult result = future.GetValue(TDuration::Max());
-    result.GetError().Throw();
-
-    const NKikimrClient::TResponse& response = result.GetResult<NKikimrClient::TResponse>();
-    ui64 pathId = response.GetFlatTxId().GetPathId();
-    Y_ABORT_UNLESS(pathId);
-    return TSchemaObject(Kikimr, Path, name, pathId, EPathType::Directory);
-}
-
-TSchemaObject TSchemaObject::CreateTable(const TString& name, const TVector<TColumn>& columns) {
-    return DoCreateTable(name, columns, nullptr);
-}
-
-TSchemaObject TSchemaObject::CreateTable(const TString& name, const TVector<TColumn>& columns,
-                                         const TTablePartitionConfig& partitionConfig)
-{
-    return DoCreateTable(name, columns, &partitionConfig);
-}
-
-TSchemaObject TSchemaObject::DoCreateTable(const TString& name, const TVector<TColumn>& columns,
-                                         const TTablePartitionConfig* partitionConfig)
-{
-    NThreading::TFuture<TResult> future = Kikimr.CreateTable(*this, name, columns, partitionConfig);
-    TResult result = future.GetValue(TDuration::Max());
-    result.GetError().Throw();
-
-    const NKikimrClient::TResponse& response = result.GetResult<NKikimrClient::TResponse>();
-    ui64 pathId = response.GetFlatTxId().GetPathId();
-    Y_ABORT_UNLESS(pathId);
-    return TSchemaObject(Kikimr, Path, name, pathId, EPathType::Table);
+//    ModifySchema(drop);
 }
 
 TSchemaObject TSchemaObject::GetChild(const TString& name) const {

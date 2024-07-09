@@ -35,13 +35,12 @@ SRCS(
     msgbus_server_request.cpp
     msgbus_server_request.h
     msgbus_server_scheme_initroot.cpp
-    msgbus_server_scheme_request.cpp
+    msgbus_server_scheme_request.cpp  # only for persqueue related stuff
     msgbus_server_sqs.cpp
     msgbus_server_tablet_counters.cpp
     msgbus_server_tablet_kill.cpp
     msgbus_server_tablet_state.cpp
     msgbus_server_test_shard_request.cpp
-    msgbus_server_tx_request.cpp
     msgbus_server_types.cpp
     msgbus_servicereq.h
     msgbus_tabletreq.h

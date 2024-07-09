@@ -594,11 +594,6 @@ public:
     TSchemaObject(const TSchemaObject&) = default;
 
     void Drop();
-    void ModifySchema(const TModifyScheme& schema);
-    TSchemaObject MakeDirectory(const TString& name);
-    TSchemaObject CreateTable(const TString& name, const TVector<TColumn>& columns);
-    TSchemaObject CreateTable(const TString& name, const TVector<TColumn>& columns,
-                              const TTablePartitionConfig& partitionConfig);
     TSchemaObject GetChild(const TString& name) const;
     TString GetName() const;
     TString GetPath() const;
@@ -799,10 +794,6 @@ protected:
     NThreading::TFuture<TQueryResult> ExecuteQuery(const TPreparedQuery& query, const TString& parameters);
     NThreading::TFuture<TPrepareResult> PrepareQuery(const TTextQuery& query);
     NThreading::TFuture<TResult> DescribeObject(const TSchemaObject& object);
-    NThreading::TFuture<TResult> ModifySchema(const TModifyScheme& schema);
-    NThreading::TFuture<TResult> MakeDirectory(const TSchemaObject& object, const TString& name);
-    NThreading::TFuture<TResult> CreateTable(TSchemaObject& object, const TString& name, const TVector<TColumn>& columns,
-                                             const TTablePartitionConfig* partitionConfig);
     NBus::EMessageStatus ExecuteRequestInternal(NThreading::TPromise<TResult> promise, TAutoPtr<NBus::TBusMessage> request);
     NThreading::TFuture<TResult> RegisterNode(const TString& domainPath, const TString& host, ui16 port,
                                               const TString& address, const TString& resolveHost,
@@ -855,12 +846,6 @@ protected:
     }
 
     void PrepareRequest(NKikimrClient::TSchemeDescribe& request) const {
-        if (!SecurityToken.empty()) {
-            request.SetSecurityToken(SecurityToken);
-        }
-    }
-
-    void PrepareRequest(NKikimrClient::TSchemeOperation& request) const {
         if (!SecurityToken.empty()) {
             request.SetSecurityToken(SecurityToken);
         }

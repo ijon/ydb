@@ -11,7 +11,6 @@ SRCS(
     kikimr.cpp
     query.cpp
     result.cpp
-    schema.cpp
 )
 
 PEERDIR(

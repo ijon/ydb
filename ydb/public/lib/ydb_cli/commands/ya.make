@@ -20,7 +20,6 @@ SRCS(
     ydb_service_import.cpp
     ydb_service_monitoring.cpp
     ydb_service_operation.cpp
-    ydb_service_scheme.cpp
     ydb_service_scripting.cpp
     ydb_service_topic.cpp
     ydb_service_table.cpp
@@ -48,6 +47,7 @@ PEERDIR(
     ydb/public/lib/ydb_cli/commands/topic_workload
     ydb/public/lib/ydb_cli/commands/transfer_workload
     ydb/public/lib/ydb_cli/commands/ydb_discovery
+    ydb/public/lib/ydb_cli/commands/ydb_scheme
     ydb/public/lib/ydb_cli/dump
     ydb/public/lib/ydb_cli/import
     ydb/public/lib/ydb_cli/topic

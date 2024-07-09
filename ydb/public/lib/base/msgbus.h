@@ -44,8 +44,8 @@ enum {
     MTYPE_CLIENT_TABLET_KILL_REQUEST = 10429,
     MTYPE_CLIENT_TABLET_STATE_REQUEST = 10430,
     MTYPE_CLIENT_LOCAL_MINIKQL = 10431,
-    MTYPE_CLIENT_FLAT_TX_REQUEST = 10432,
-    MTYPE_CLIENT_FLAT_TX_STATUS_REQUEST = 10434,
+    MTYPE_CLIENT_DEPRECATED_10432 = 10432,  // MTYPE_CLIENT_FLAT_TX_REQUEST
+    MTYPE_CLIENT_DEPRECATED_10434 = 10434,  // MTYPE_CLIENT_FLAT_TX_STATUS_REQUEST
     MTYPE_CLIENT_OLD_FLAT_DESCRIBE_REQUEST = 10435, // deprecated
     MTYPE_CLIENT_OLD_FLAT_DESCRIBE_RESPONSE = 10436, // deprecated
     MTYPE_CLIENT_CREATE_TABLET = 10437,
@@ -115,8 +115,6 @@ struct TBusTabletStateRequest : TBusMessage<TBusTabletStateRequest, NKikimrClien
 struct TBusTabletCountersRequest : TBusMessage<TBusTabletCountersRequest, NKikimrClient::TTabletCountersRequest, MTYPE_CLIENT_TABLET_COUNTERS_REQUEST> {};
 struct TBusTabletLocalMKQL : TBusMessage<TBusTabletLocalMKQL, NKikimrClient::TLocalMKQL, MTYPE_CLIENT_LOCAL_MINIKQL> {};
 struct TBusTabletLocalSchemeTx : TBusMessage<TBusTabletLocalSchemeTx, NKikimrClient::TLocalSchemeTx, MTYPE_CLIENT_LOCAL_SCHEME_TX> {};
-struct TBusSchemeOperation : TBusMessage<TBusSchemeOperation, NKikimrClient::TSchemeOperation, MTYPE_CLIENT_FLAT_TX_REQUEST> {};
-struct TBusSchemeOperationStatus : TBusMessage<TBusSchemeOperationStatus, NKikimrClient::TSchemeOperationStatus, MTYPE_CLIENT_FLAT_TX_STATUS_REQUEST> {};
 struct TBusSchemeDescribe : TBusMessage<TBusSchemeDescribe, NKikimrClient::TSchemeDescribe, MTYPE_CLIENT_FLAT_DESCRIBE_REQUEST> {};
 struct TBusOldFlatDescribeRequest : TBusMessage<TBusOldFlatDescribeRequest, NKikimrClient::TSchemeDescribe, MTYPE_CLIENT_OLD_FLAT_DESCRIBE_REQUEST> {};
 struct TBusOldFlatDescribeResponse : TBusMessage<TBusOldFlatDescribeResponse, NKikimrClient::TFlatDescribeResponse, MTYPE_CLIENT_OLD_FLAT_DESCRIBE_RESPONSE> {};
@@ -199,8 +197,6 @@ public:
         RegisterType(new TBusTabletCountersRequest);
         RegisterType(new TBusTabletLocalMKQL);
         RegisterType(new TBusTabletLocalSchemeTx);
-        RegisterType(new TBusSchemeOperation);
-        RegisterType(new TBusSchemeOperationStatus);
         RegisterType(new TBusSchemeDescribe);
         RegisterType(new TBusOldFlatDescribeRequest);
         RegisterType(new TBusOldFlatDescribeResponse);

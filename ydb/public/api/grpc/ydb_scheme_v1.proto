@@ -28,4 +28,8 @@ service SchemeService {
 
     // Modify permissions.
     rpc ModifyPermissions(Scheme.ModifyPermissionsRequest) returns (Scheme.ModifyPermissionsResponse);
+
+    // General modify scheme
+    rpc ModifyScheme(Scheme.ModifySchemeRequest) returns (Scheme.ModifySchemeResponse);
+
 }

@@ -15,6 +15,7 @@ PEERDIR(
     ydb/public/sdk/cpp/client/resources
     ydb/public/sdk/cpp/client/ydb_table
     ydb/public/lib/ydb_cli/commands/ydb_discovery
+    ydb/public/lib/ydb_cli/commands/ydb_scheme
 )
 
 YQL_LAST_ABI_VERSION()

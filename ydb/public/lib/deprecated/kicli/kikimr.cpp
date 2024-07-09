@@ -88,24 +88,6 @@ public:
                     const NKikimrClient::TResponse& response = static_cast<NMsgBusProxy::TBusResponse*>(reply.Get())->Record;
                     DumpResponse(response);
                     switch (response.GetStatus()) {
-                        case NMsgBusProxy::MSTATUS_INPROGRESS: {
-                            if (response.HasFlatTxId()) {
-                                // long polling in progress
-                                TAutoPtr<NMsgBusProxy::TBusSchemeOperationStatus> statusRequest = new NMsgBusProxy::TBusSchemeOperationStatus();
-                                statusRequest->Record.MutableFlatTxId()->CopyFrom(response.GetFlatTxId());
-                                statusRequest->Record.MutablePollOptions()->SetTimeout(POLLING_TIMEOUT);
-                                auto status = ExecuteRequest(promise, statusRequest.Release());
-                                if (status != NBus::MESSAGE_OK) {
-                                    // retry failed - set error value and leaving
-                                    promise.SetValue(TResult(status));
-                                } else {
-                                    // continue polling, cleanup Data for current request
-                                    delete reinterpret_cast<TRetryState*>(request->Data);
-                                    return;
-                                }
-                            }
-                            break;
-                        }
                         case NMsgBusProxy::MSTATUS_REJECTED: {
                             // request was rejected (overloaded?) - retrying
                             TRetryState* retryState = reinterpret_cast<TRetryState*>(request->Data);
@@ -216,7 +198,7 @@ public:
                 const NGRpcProxy::TGrpcError* error,
                 const typename ResponseType::RecordType& proto) {
             if (error) {
-                OnCall(MapGrpcStatus(error->second), error->first, promise, request, nullptr);
+                OnCall(MapGrpcStatus(error->second), TStringBuilder() << error->first << "(" << error->second << ")", promise, request, nullptr);
             } else {
                 auto reply = new ResponseType;
                 reply->Record = proto;
@@ -232,10 +214,6 @@ public:
         switch(type) {
         case NMsgBusProxy::MTYPE_CLIENT_REQUEST:
             return ExecuteGRpcRequest<NMsgBusProxy::TBusRequest>(&NGRpcProxy::TGRpcClient::Request, promise, request);
-        case NMsgBusProxy::MTYPE_CLIENT_FLAT_TX_REQUEST:
-            return ExecuteGRpcRequest<NMsgBusProxy::TBusSchemeOperation>(&NGRpcProxy::TGRpcClient::SchemeOperation, promise, request);
-        case NMsgBusProxy::MTYPE_CLIENT_FLAT_TX_STATUS_REQUEST:
-            return ExecuteGRpcRequest<NMsgBusProxy::TBusSchemeOperationStatus>(&NGRpcProxy::TGRpcClient::SchemeOperationStatus, promise, request);
         case NMsgBusProxy::MTYPE_CLIENT_FLAT_DESCRIBE_REQUEST:
             return ExecuteGRpcRequest<NMsgBusProxy::TBusSchemeDescribe>(&NGRpcProxy::TGRpcClient::SchemeDescribe, promise, request);
         case NMsgBusProxy::MTYPE_CLIENT_PERSQUEUE:
@@ -489,52 +467,6 @@ NThreading::TFuture<TPrepareResult> TKikimr::PrepareQuery(const TTextQuery& quer
 NThreading::TFuture<TResult> TKikimr::DescribeObject(const TSchemaObject& object) {
     TAutoPtr<NMsgBusProxy::TBusSchemeDescribe> request(new NMsgBusProxy::TBusSchemeDescribe());
     request->Record.SetPath(object.GetPath());
-    return ExecuteRequest(request.Release());
-}
-
-NThreading::TFuture<TResult> TKikimr::ModifySchema(const TModifyScheme& schema) {
-    TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-    request->Record.MutablePollOptions()->SetTimeout(POLLING_TIMEOUT);
-    request->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(schema);
-    return ExecuteRequest(request.Release());
-}
-
-NThreading::TFuture<TResult> TKikimr::MakeDirectory(const TSchemaObject& object, const TString& name) {
-    TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-    request->Record.MutablePollOptions()->SetTimeout(POLLING_TIMEOUT);
-    auto* modifyScheme = request->Record.MutableTransaction()->MutableModifyScheme();
-    modifyScheme->SetWorkingDir(object.GetPath());
-    modifyScheme->SetOperationType(NKikimrSchemeOp::ESchemeOpMkDir);
-    auto* makeDirectory = modifyScheme->MutableMkDir();
-    makeDirectory->SetName(name);
-    return ExecuteRequest(request.Release());
-}
-
-NThreading::TFuture<TResult> TKikimr::CreateTable(TSchemaObject& object, const TString& name, const TVector<TColumn>& columns,
-                                                  const TTablePartitionConfig* partitionConfig)
-{
-    TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-    request->Record.MutablePollOptions()->SetTimeout(POLLING_TIMEOUT);
-    auto* modifyScheme = request->Record.MutableTransaction()->MutableModifyScheme();
-    modifyScheme->SetWorkingDir(object.GetPath());
-    modifyScheme->SetOperationType(NKikimrSchemeOp::ESchemeOpCreateTable);
-    auto* createTable = modifyScheme->MutableCreateTable();
-    createTable->SetName(name);
-    for (const TColumn& column : columns) {
-        auto* col = createTable->AddColumns();
-        col->SetName(column.Name);
-        col->SetType(column.Type.GetName());
-        if (column.Key) {
-            createTable->AddKeyColumnNames(column.Name);
-            if (column.Partitions != 0) {
-                Y_ASSERT(!createTable->HasUniformPartitionsCount());
-                createTable->SetUniformPartitionsCount(column.Partitions);
-            }
-        }
-    }
-    if (partitionConfig) {
-        createTable->MutablePartitionConfig()->CopyFrom(*partitionConfig);
-    }
     return ExecuteRequest(request.Release());
 }
 

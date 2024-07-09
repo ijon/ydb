@@ -14,5 +14,8 @@ void DoListDirectoryRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityPro
 void DoDescribePathRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f);
 void DoModifyPermissionsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f);
 
+// Generic ModifyScheme request (for admin and dev/test purposes)
+void DoModifySchemeRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f);
+
 }
 }

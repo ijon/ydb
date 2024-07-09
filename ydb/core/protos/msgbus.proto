@@ -185,9 +185,6 @@ message TResponse {
     optional NKikimrSchemeOp.TPathDescription PathDescription = 600;
     optional string Path = 601;
 
-    // TSchemeOperation
-    optional TFlatTxId FlatTxId = 700;
-
     // TPersQueueRequest
     optional NPersQueue.NErrorCode.EErrorCode ErrorCode = 800; // TODO: rename to something more PQ-specific
     optional TPersQueuePartitionResponse PartitionResponse = 801;
@@ -409,17 +406,6 @@ message TTabletStateRequest {
     repeated fixed64 TabletIDs = 3;
 };
 
-message TFlatTxPollOptions {
-    optional uint32 Timeout = 1 [default = 1000]; // ms
-};
-
-message TSchemeOperation {
-    optional NKikimrTxUserProxy.TTransaction Transaction = 1;
-    optional TFlatTxPollOptions PollOptions = 10;
-    optional string SecurityToken = 5;
-};
-
-
 message TSchemeDescribe {
     optional string Path = 1;
     optional uint64 PathId = 2;
@@ -439,11 +425,6 @@ message TFlatDescribeResponse {
 
     optional NKikimrIssues.TStatusIds.EStatusCode StatusCode = 7;
     repeated Ydb.Issue.IssueMessage Issues = 8;
-};
-
-message TSchemeOperationStatus {
-    optional TFlatTxId FlatTxId = 1;
-    optional TFlatTxPollOptions PollOptions = 10;
 };
 
 message TJsonSettings {

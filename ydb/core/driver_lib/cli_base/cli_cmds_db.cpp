@@ -1,6 +1,17 @@
 #include "cli.h"
 #include "cli_cmds.h"
 
+#include <ydb/public/sdk/cpp/client/ydb_common_client/impl/client.h>
+
+#include <ydb/public/lib/ydb_cli/commands/ydb_command.h>  // for NYdb::NConsoleClient::TYdbCommand::CreateDriver
+// Reuse ydb commands:
+// NYdb::NConsoleClient::TCommandMakeDirectory
+// NYdb::NConsoleClient::TCommandChangeOwner
+#include <ydb/public/lib/ydb_cli/commands/ydb_service_scheme.h>
+
+#include <ydb/public/api/grpc/ydb_scheme_v1.grpc.pb.h>
+#include <ydb/public/sdk/cpp/client/ydb_scheme/scheme.h>
+
 #include <ydb/core/tx/schemeshard/schemeshard_user_attr_limits.h>
 #include <ydb/core/protos/bind_channel_storage_pool.pb.h>
 
@@ -26,151 +37,200 @@ void WarnProfilePathSet() {
     Cout << "FYI: profile path is set. You can use short pathnames. Try --help for more info." << Endl;
 }
 
-class TClientCommandSchemaMkdir : public TClientCommand {
-public:
-    TClientCommandSchemaMkdir()
-        : TClientCommand("mkdir", {}, "Create directory")
-    {}
+std::pair<TString, TString> SplitPath(const TClientCommand::TConfig& config, const TString& pathname) {
+    std::pair<TString, TString> result;
 
-    TAutoPtr<NKikimrClient::TSchemeOperation> Request;
-
-    virtual void Config(TConfig& config) override {
-        TClientCommand::Config(config);
-        config.SetFreeArgsNum(1);
-        SetFreeArgTitle(0, "<NAME>", "Full pathname of a directory (e.g. /ru/home/user/mydb/test1/test2).\n"
-            "          Or short pathname if profile path is set (e.g. test1/test2).");
+    size_t pos = pathname.rfind('/');
+    if (config.Path) {
+        // Profile path is set
+        if (!pathname.StartsWith('/')) {
+            result.first = config.Path;
+            result.second = pathname;
+        } else {
+            WarnProfilePathSet();
+            result.first = pathname.substr(0, pos);
+            result.second = pathname.substr(pos + 1);
+        }
+    } else {
+        result.first = pathname.substr(0, pos);
+        result.second = pathname.substr(pos + 1);
     }
 
-    TString Base;
+    return result;
+}
+
+using TClientGrpcCommandBaseModifyScheme = TClientGRpcCommand<
+    Ydb::Scheme::V1::SchemeService,
+    Ydb::Scheme::ModifySchemeRequest,
+    Ydb::Scheme::ModifySchemeResponse,
+    decltype(&Ydb::Scheme::V1::SchemeService::Stub::AsyncModifyScheme),
+    &Ydb::Scheme::V1::SchemeService::Stub::AsyncModifyScheme
+>;
+
+void AddModifyScheme(Ydb::Scheme::ModifySchemeRequest *request, const NKikimrSchemeOp::TModifyScheme& proto) {
+    TString& serializedField = *request->add_modify_schemes();
+    Y_PROTOBUF_SUPPRESS_NODISCARD proto.SerializeToString(&serializedField);
+}
+
+std::optional<NKikimrSchemeOp::EOperationType> EntryTypeToDropOperationType(NYdb::NScheme::ESchemeEntryType entryType) {
+    // using NKikimrSchemeOp::EPathType;
+    // using NKikimrSchemeOp::EOperationType;
+    switch (entryType) {
+        case NYdb::NScheme::ESchemeEntryType::Directory:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpRmDir;
+        case NYdb::NScheme::ESchemeEntryType::Table:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropTable;
+        // PqGroup and Topic are the same
+        case NYdb::NScheme::ESchemeEntryType::PqGroup:
+        case NYdb::NScheme::ESchemeEntryType::Topic:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup;
+        case NYdb::NScheme::ESchemeEntryType::BlockStoreVolume:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropBlockStoreVolume;
+        case NYdb::NScheme::ESchemeEntryType::CoordinationNode:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropKesus;
+        case NYdb::NScheme::ESchemeEntryType::ColumnStore:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropColumnStore;
+        case NYdb::NScheme::ESchemeEntryType::ColumnTable:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropColumnTable;
+        case NYdb::NScheme::ESchemeEntryType::Sequence:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropSequence;
+        case NYdb::NScheme::ESchemeEntryType::Replication:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropReplication;
+        case NYdb::NScheme::ESchemeEntryType::ExternalTable:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalTable;
+        case NYdb::NScheme::ESchemeEntryType::ExternalDataSource:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalDataSource;
+        case NYdb::NScheme::ESchemeEntryType::View:
+            return NKikimrSchemeOp::EOperationType::ESchemeOpDropView;
+        // NYdb::NScheme::ESchemeEntryType::ResourcePool
+        // NYdb::NScheme::ESchemeEntryType::SubDomain
+        // NYdb::NScheme::ESchemeEntryType::RtmrVolume
+        // NYdb::NScheme::ESchemeEntryType::FileStore
+        // NYdb::NScheme::ESchemeEntryType::TableIndex
+        // NYdb::NScheme::ESchemeEntryType::ExtSubDomain
+        // NYdb::NScheme::ESchemeEntryType::CdcStream
+        // and others
+        default:
+            break;
+    }
+    return std::nullopt;
+}
+
+class TClientCommandSchemaDrop : public TClientGrpcCommandBaseModifyScheme {
+    using TBase = TClientGrpcCommandBaseModifyScheme;
+
+public:
+
+    TString Path;
+    TString WorkingDir;
     TString Name;
 
-    virtual void Parse(TConfig& config) override {
-        TClientCommand::Parse(config);
-        TString pathname = config.ParseResult->GetFreeArgs()[0];
-        size_t pos = pathname.rfind('/');
-        if (config.Path) {
-            // Profile path is set
-            if (!pathname.StartsWith('/')) {
-                Base = config.Path;
-                Name = pathname;
-                return;
-            } else {
-                WarnProfilePathSet();
-            }
-        }
-        Base = pathname.substr(0, pos);
-        Name = pathname.substr(pos + 1);
-    }
-
-    virtual int Run(TConfig& config) override {
-        auto handler = [this](NClient::TKikimr& kikimr) {
-            kikimr.GetSchemaRoot(Base).MakeDirectory(Name);
-            return 0;
-        };
-        return InvokeThroughKikimr(config, std::move(handler));
-    }
-};
-
-class TClientCommandSchemaDrop : public TClientCommand {
-public:
     TClientCommandSchemaDrop()
-        : TClientCommand("drop", {}, "Remove schema object")
+        : TBase("drop", {}, "Remove schema object")
     {}
 
-    TAutoPtr<NKikimrClient::TSchemeOperation> Request;
-
     virtual void Config(TConfig& config) override {
-        TClientCommand::Config(config);
+        TBase::Config(config);
+
         config.SetFreeArgsNum(1);
         SetFreeArgTitle(0, "<NAME>", "Full pathname of an object (e.g. /ru/home/user/mydb/test1/test2).\n"
             "          Or short pathname if profile path is set (e.g. test1/test2).");
     }
 
-    TString Base;
-    TString Name;
-
     virtual void Parse(TConfig& config) override {
-        TClientCommand::Parse(config);
-        TString pathname = config.ParseResult->GetFreeArgs()[0];
-        size_t pos = pathname.rfind('/');
-        if (config.Path) {
-            // Profile path is set
-            if (!pathname.StartsWith('/')) {
-                Base = config.Path;
-                Name = pathname;
-                return;
-            } else {
-                WarnProfilePathSet();
-            }
-        }
-        Base = pathname.substr(0, pos);
-        Name = pathname.substr(pos + 1);
+        TBase::Parse(config);
+
+        Path = config.ParseResult->GetFreeArgs()[0];
+        std::tie(WorkingDir, Name) = SplitPath(config, Path);
     }
 
     virtual int Run(TConfig& config) override {
-        auto handler = [this](NClient::TKikimr& kikimr) {
-            kikimr.GetSchemaRoot(Base).GetChild(Name).Drop();
-            return 0;
-        };
-        return InvokeThroughKikimr(config, std::move(handler));
+        auto entryType = NYdb::NScheme::ESchemeEntryType::Unknown;
+        {
+            NYdb::NScheme::TSchemeClient client(NYdb::NConsoleClient::TYdbCommand::CreateDriver(config));
+            auto entity = client.DescribePath(Path).ExtractValueSync();
+            if (!entity.IsSuccess()) {
+                Cerr << "ERROR: " << entity << Endl;
+                return (int)entity.GetStatus();
+            }
+            entryType = entity.GetEntry().Type;
+        }
+
+        auto operationType = EntryTypeToDropOperationType(entryType);
+        if (!operationType.has_value()) {
+            Cerr << "ERROR: " << "not supported for path type " << entryType << Endl;
+            return 1;
+        }
+
+        NKikimrSchemeOp::TModifyScheme modifyScheme;
+        modifyScheme.SetOperationType(operationType.value());
+        modifyScheme.SetWorkingDir(WorkingDir);
+        auto& drop = *modifyScheme.MutableDrop();
+        drop.SetName(Name);
+
+        AddModifyScheme(&GRpcRequest, modifyScheme);
+
+        return TBase::Run(config);
+    }
+
+    virtual void PrintResponse(const Ydb::Operations::Operation &response) override {
+        if (response.status() != Ydb::StatusIds::SUCCESS) {
+            TBase::PrintResponse(response);
+        }
     }
 };
 
-class TClientCommandSchemaExec : public TClientCommandBase {
+class TClientCommandSchemaExec : public TClientGrpcCommandBaseModifyScheme {
+    using TBase = TClientGrpcCommandBaseModifyScheme;
+
 public:
+
+    bool ShowTxId = false;
+    bool Verbose = false;
+
+    NKikimrSchemeOp::TModifyScript ModifySchemeScript;
+
     TClientCommandSchemaExec()
-        : TClientCommandBase("execute", { "exec" }, "Execute schema protobuf")
+        : TBase("execute", { "exec" }, "Execute ModifyScheme protobuf")
     {}
 
-    bool ReturnTxId;
-
-    TList<TAutoPtr<NKikimrClient::TSchemeOperation>> Requests;
-
     virtual void Config(TConfig& config) override {
-        TClientCommand::Config(config);
-        ReturnTxId = false;
-        config.Opts->AddLongOption('t', "txid", "Print TxId").NoArgument().SetFlag(&ReturnTxId);
+        TBase::Config(config);
+
+        config.Opts->AddLongOption('t', "txid", "Print TxId").NoArgument().SetFlag(&ShowTxId);
+        config.Opts->AddLongOption('v', "verbose", "Verbose output").NoArgument().SetFlag(&Verbose);
         config.SetFreeArgsNum(1);
-        SetFreeArgTitle(0, "<SCHEMA-PROTO>", "Schema protobuf or file with schema protobuf");
+        SetFreeArgTitle(0, "<PBTXT|FILE>", "ModifyScheme protobuf text or file to read it from");
     }
 
     virtual void Parse(TConfig& config) override {
-        TClientCommand::Parse(config);
-        NKikimrSchemeOp::TModifyScript protoScript;
-        ParseProtobuf(&protoScript, config.ParseResult->GetFreeArgs()[0]);
-        for (const auto& modifyScheme : protoScript.GetModifyScheme()) {
-            TAutoPtr<NKikimrClient::TSchemeOperation> request = new NKikimrClient::TSchemeOperation();
-            request->MutablePollOptions()->SetTimeout(NClient::TKikimr::POLLING_TIMEOUT);
-            request->MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
-            Requests.emplace_back(request);
-        }
+        TBase::Parse(config);
+
+        TClientCommandBase::ParseProtobuf(&ModifySchemeScript, config.ParseResult->GetFreeArgs()[0]);
     }
 
     virtual int Run(TConfig& config) override {
-        int result = 0;
-        for (const auto& pbRequest : Requests) {
-            TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-            request->Record.MergeFrom(*pbRequest);
-            result = MessageBusCall<NMsgBusProxy::TBusSchemeOperation, NMsgBusProxy::TBusResponse>(config, request,
-                [this](const NMsgBusProxy::TBusResponse& response) -> int {
-                    if (response.Record.GetStatus() != NMsgBusProxy::MSTATUS_OK) {
-                        Cerr << ToCString(static_cast<NMsgBusProxy::EResponseStatus>(response.Record.GetStatus())) << " " << response.Record.GetErrorReason() << Endl;
-                        return 1;
-                    }
-                    if (ReturnTxId) {
-                        if (response.Record.HasFlatTxId() && response.Record.GetFlatTxId().HasTxId()) {
-                            Cout << "TxId: " << response.Record.GetFlatTxId().GetTxId() << Endl;
-                        } else {
-                            Cout << "TxId: not returned" << Endl;
-                        }
-                    }
-                    return 0;
-            });
-            if (result != 0) {
-                break;
+        for (const auto& i : ModifySchemeScript.GetModifyScheme()) {
+            AddModifyScheme(&GRpcRequest, i);
+        }
+
+        return TBase::Run(config);
+    }
+
+    virtual void PrintResponse(const Ydb::Operations::Operation &response) override {
+        if (response.status() != Ydb::StatusIds::SUCCESS) {
+            TBase::PrintResponse(response);
+        } else {
+            if (ShowTxId) {
+                Ydb::Scheme::ModifySchemeResult result;
+                response.result().UnpackTo(&result);
+                if (Verbose) {
+                    Cout << "TxId: " << (result.tx_id().empty() ? "not returned" : result.tx_id()) << Endl;
+                } else {
+                    Cout << result.tx_id() << Endl;
+                }
             }
         }
-        return result;
     }
 };
 
@@ -553,19 +613,20 @@ public:
     }
 };
 
-class TClientCommandSchemaChown : public TClientCommand {
+class TClientCommandSchemaChown : public TClientGrpcCommandBaseModifyScheme {
+    using TBase = TClientGrpcCommandBaseModifyScheme;
+
 public:
     TClientCommandSchemaChown()
-        : TClientCommand("chown", {}, "Change owner")
+        : TBase("chown", {}, "Change owner")
     {}
-
-    TAutoPtr<NKikimrClient::TSchemeOperation> Request;
 
     bool Recursive = false;
     bool Verbose = false;
 
     virtual void Config(TConfig& config) override {
-        TClientCommand::Config(config);
+        TBase::Config(config);
+
         config.SetFreeArgsNum(2);
         SetFreeArgTitle(0, "<USER>", "User");
         SetFreeArgTitle(1, "<PATH>", "Full pathname of an object (e.g. /ru/home/user/mydb/test1/test2).\n"
@@ -578,7 +639,8 @@ public:
     TString Path;
 
     virtual void Parse(TConfig& config) override {
-        TClientCommand::Parse(config);
+        TBase::Parse(config);
+
         Owner = config.ParseResult->GetFreeArgs()[0];
         TString pathname = config.ParseResult->GetFreeArgs()[1];
         if (config.Path) {
@@ -594,29 +656,24 @@ public:
     }
 
     int Chown(TConfig& config, const TString& path) {
-        size_t pos = path.rfind('/');
-        TString base = path.substr(0, pos);
-        TString name = path.substr(pos + 1);
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        NKikimrClient::TSchemeOperation& record(request->Record);
-        auto& modifyScheme = *record.MutableTransaction()->MutableModifyScheme();
+        //FIXME: remove excessive warning about profile path set
+        auto [workingDir, name] = SplitPath(config, path);
+
+        NKikimrSchemeOp::TModifyScheme modifyScheme;
+
         modifyScheme.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpModifyACL);
-        modifyScheme.SetWorkingDir(base);
+        modifyScheme.SetWorkingDir(workingDir);
         auto& modifyAcl = *modifyScheme.MutableModifyACL();
         modifyAcl.SetName(name);
         modifyAcl.SetNewOwner(Owner);
+
+        AddModifyScheme(&GRpcRequest, modifyScheme);
+
         if (Verbose) {
             Cout << path << Endl;
         }
-        int result = MessageBusCall<NMsgBusProxy::TBusSchemeOperation, NMsgBusProxy::TBusResponse>(config, request,
-            [path](const NMsgBusProxy::TBusResponse& response) -> int {
-                if (response.Record.GetStatus() != NMsgBusProxy::MSTATUS_OK) {
-                    Cerr << path << ' ' << ToCString(static_cast<NMsgBusProxy::EResponseStatus>(response.Record.GetStatus())) << " " << response.Record.GetErrorReason() << Endl;
-                    return 1;
-                }
-                return 0;
-        });
-        return result;
+
+        return TBase::Run(config);
     }
 
     TList<TString> Ls(TConfig& config, const TString& path) {
@@ -651,55 +708,47 @@ public:
         }
         return 0;
     }
+
+    virtual void PrintResponse(const Ydb::Operations::Operation &response) override {
+        if (response.status() != Ydb::StatusIds::SUCCESS) {
+            TBase::PrintResponse(response);
+        }
+    }
 };
 
-class TClientCommandSchemaAccessAdd : public TClientCommand {
+class TClientCommandSchemaAccessAdd : public TClientGrpcCommandBaseModifyScheme {
+    using TBase = TClientGrpcCommandBaseModifyScheme;
+
 public:
     TClientCommandSchemaAccessAdd()
-        : TClientCommand("add", {}, "Add access right")
+        : TBase("add", {}, "Add access right")
     {}
 
-    TAutoPtr<NKikimrClient::TSchemeOperation> Request;
-
     virtual void Config(TConfig& config) override {
-        TClientCommand::Config(config);
+        TBase::Config(config);
+
         config.SetFreeArgsNum(2);
         SetFreeArgTitle(0, "<PATH>", "Full pathname of an object (e.g. /ru/home/user/mydb/test1/test2).\n"
             "            Or short pathname if profile path is set (e.g. test1/test2).");
         SetFreeArgTitle(1, "<ACCESS>", "ACCESS");
     }
 
-    TString Access;
-    TString Base;
+    TString WorkingDir;
     TString Name;
+    TString Access;
 
     virtual void Parse(TConfig& config) override {
-        TClientCommand::Parse(config);
-        TString pathname = config.ParseResult->GetFreeArgs()[0];
-        size_t pos = pathname.rfind('/');
-        if (config.Path) {
-            // Profile path is set
-            if (!pathname.StartsWith('/')) {
-                Base = config.Path;
-                Name = pathname;
-            } else {
-                WarnProfilePathSet();
-                Base = pathname.substr(0, pos);
-                Name = pathname.substr(pos + 1);
-            }
-        } else {
-            Base = pathname.substr(0, pos);
-            Name = pathname.substr(pos + 1);
-        }
+        TBase::Parse(config);
+
+        std::tie(WorkingDir, Name) = SplitPath(config, config.ParseResult->GetFreeArgs()[0]);
         Access = config.ParseResult->GetFreeArgs()[1];
     }
 
     virtual int Run(TConfig& config) override {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        NKikimrClient::TSchemeOperation& record(request->Record);
-        auto& modifyScheme = *record.MutableTransaction()->MutableModifyScheme();
+        NKikimrSchemeOp::TModifyScheme modifyScheme;
+
         modifyScheme.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpModifyACL);
-        modifyScheme.SetWorkingDir(Base);
+        modifyScheme.SetWorkingDir(WorkingDir);
         auto& modifyAcl = *modifyScheme.MutableModifyACL();
         modifyAcl.SetName(Name);
         NACLib::TDiffACL diffAcl;
@@ -712,65 +761,52 @@ public:
             diffAcl.AddAccess(ace);
         }
         modifyAcl.SetDiffACL(diffAcl.SerializeAsString());
-        int result = MessageBusCall<NMsgBusProxy::TBusSchemeOperation, NMsgBusProxy::TBusResponse>(config, request,
-            [](const NMsgBusProxy::TBusResponse& response) -> int {
-                if (response.Record.GetStatus() != NMsgBusProxy::MSTATUS_OK) {
-                    Cerr << ToCString(static_cast<NMsgBusProxy::EResponseStatus>(response.Record.GetStatus())) << " " << response.Record.GetErrorReason() << Endl;
-                    return 1;
-                }
-                return 0;
-        });
-        return result;
+
+        AddModifyScheme(&GRpcRequest, modifyScheme);
+
+        return TBase::Run(config);
+    }
+
+    virtual void PrintResponse(const Ydb::Operations::Operation &response) override {
+        if (response.status() != Ydb::StatusIds::SUCCESS) {
+            TBase::PrintResponse(response);
+        }
     }
 };
 
-class TClientCommandSchemaAccessRemove : public TClientCommand {
+class TClientCommandSchemaAccessRemove : public TClientGrpcCommandBaseModifyScheme {
+    using TBase = TClientGrpcCommandBaseModifyScheme;
+
 public:
     TClientCommandSchemaAccessRemove()
-        : TClientCommand("remove", {}, "Remove access right")
+        : TBase("remove", {}, "Remove access right")
     {}
 
-    TAutoPtr<NKikimrClient::TSchemeOperation> Request;
-
     virtual void Config(TConfig& config) override {
-        TClientCommand::Config(config);
+        TBase::Config(config);
+
         config.SetFreeArgsNum(2);
         SetFreeArgTitle(0, "<PATH>", "Full pathname of an object (e.g. /ru/home/user/mydb/test1/test2).\n"
             "            Or short pathname if profile path is set (e.g. test1/test2).");
         SetFreeArgTitle(1, "<ACCESS>", "ACCESS");
     }
 
-    TString Access;
-    TString Base;
+    TString WorkingDir;
     TString Name;
+    TString Access;
 
     virtual void Parse(TConfig& config) override {
-        TClientCommand::Parse(config);
-        TString pathname = config.ParseResult->GetFreeArgs()[0];
-        size_t pos = pathname.rfind('/');
-        if (config.Path) {
-            // Profile path is set
-            if (!pathname.StartsWith('/')) {
-                Base = config.Path;
-                Name = pathname;
-            } else {
-                WarnProfilePathSet();
-                Base = pathname.substr(0, pos);
-                Name = pathname.substr(pos + 1);
-            }
-        } else {
-            Base = pathname.substr(0, pos);
-            Name = pathname.substr(pos + 1);
-        }
+        TBase::Parse(config);
+
+        std::tie(WorkingDir, Name) = SplitPath(config, config.ParseResult->GetFreeArgs()[0]);
         Access = config.ParseResult->GetFreeArgs()[1];
     }
 
     virtual int Run(TConfig& config) override {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        NKikimrClient::TSchemeOperation& record(request->Record);
-        auto& modifyScheme = *record.MutableTransaction()->MutableModifyScheme();
+        NKikimrSchemeOp::TModifyScheme modifyScheme;
+
         modifyScheme.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpModifyACL);
-        modifyScheme.SetWorkingDir(Base);
+        modifyScheme.SetWorkingDir(WorkingDir);
         auto& modifyAcl = *modifyScheme.MutableModifyACL();
         modifyAcl.SetName(Name);
         NACLib::TDiffACL diffAcl;
@@ -780,15 +816,16 @@ public:
             diffAcl.RemoveAccess(ace);
         }
         modifyAcl.SetDiffACL(diffAcl.SerializeAsString());
-        int result = MessageBusCall<NMsgBusProxy::TBusSchemeOperation, NMsgBusProxy::TBusResponse>(config, request,
-            [](const NMsgBusProxy::TBusResponse& response) -> int {
-                if (response.Record.GetStatus() != NMsgBusProxy::MSTATUS_OK) {
-                    Cerr << ToCString(static_cast<NMsgBusProxy::EResponseStatus>(response.Record.GetStatus())) << " " << response.Record.GetErrorReason() << Endl;
-                    return 1;
-                }
-                return 0;
-        });
-        return result;
+
+        AddModifyScheme(&GRpcRequest, modifyScheme);
+
+        return TBase::Run(config);
+    }
+
+    virtual void PrintResponse(const Ydb::Operations::Operation &response) override {
+        if (response.status() != Ydb::StatusIds::SUCCESS) {
+            TBase::PrintResponse(response);
+        }
     }
 };
 
@@ -1058,52 +1095,32 @@ public:
     }
 };
 
-std::pair<TString, TString> SplitPath(const TClientCommand::TConfig& config, const TString& pathname) {
-    std::pair<TString, TString> result;
-
-    size_t pos = pathname.rfind('/');
-    if (config.Path) {
-        // Profile path is set
-        if (!pathname.StartsWith('/')) {
-            result.first = config.Path;
-            result.second = pathname;
-        } else {
-            WarnProfilePathSet();
-            result.first = pathname.substr(0, pos);
-            result.second = pathname.substr(pos + 1);
-        }
-    } else {
-        result.first = pathname.substr(0, pos);
-        result.second = pathname.substr(pos + 1);
-    }
-
-    return result;
-}
-
-class TClientCommandSchemaUserAttributeSet: public TClientCommand {
+class TClientCommandSchemaUserAttributeSet: public TClientGrpcCommandBaseModifyScheme {
+    using TBase = TClientGrpcCommandBaseModifyScheme;
     using TUserAttributesLimits = NSchemeShard::TUserAttributesLimits;
 
 public:
     TClientCommandSchemaUserAttributeSet()
-        : TClientCommand("set", {}, "Set user attribute(s)")
+        : TBase("set", {}, "Set user attribute(s)")
     {}
 
     virtual void Config(TConfig& config) override {
-        TClientCommand::Config(config);
+        TBase::Config(config);
+
         config.SetFreeArgsMin(2);
         SetFreeArgTitle(0, "<PATH>", "Full pathname of an object (e.g. /ru/home/user/mydb/test1/test2).\n"
             "            Or short pathname if profile path is set (e.g. test1/test2).");
         SetFreeArgTitle(1, "<ATTRIBUTE>", "NAME=VALUE");
     }
 
-    TString Base;
+    TString WorkingDir;
     TString Name;
     THashMap<TString, TString> Attributes;
 
     virtual void Parse(TConfig& config) override {
-        TClientCommand::Parse(config);
+        TBase::Parse(config);
 
-        std::tie(Base, Name) = SplitPath(config, config.ParseResult->GetFreeArgs()[0]);
+        std::tie(WorkingDir, Name) = SplitPath(config, config.ParseResult->GetFreeArgs()[0]);
 
         for (ui32 i = 1; i < config.ParseResult->GetFreeArgCount(); ++i) {
             TString attr = config.ParseResult->GetFreeArgs()[i];
@@ -1138,12 +1155,10 @@ public:
     }
 
     virtual int Run(TConfig& config) override {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        NKikimrClient::TSchemeOperation& record(request->Record);
+        NKikimrSchemeOp::TModifyScheme modifyScheme;
 
-        auto& modifyScheme = *record.MutableTransaction()->MutableModifyScheme();
         modifyScheme.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterUserAttributes);
-        modifyScheme.SetWorkingDir(Base);
+        modifyScheme.SetWorkingDir(WorkingDir);
 
         auto& alter = *modifyScheme.MutableAlterUserAttributes();
         alter.SetPathName(Name);
@@ -1155,42 +1170,44 @@ public:
             attribute.SetValue(kv.second);
         }
 
-        return MessageBusCall<NMsgBusProxy::TBusSchemeOperation, NMsgBusProxy::TBusResponse>(config, request,
-            [](const NMsgBusProxy::TBusResponse& response) -> int {
-                if (response.Record.GetStatus() != NMsgBusProxy::MSTATUS_OK) {
-                    Cerr << ToCString(static_cast<NMsgBusProxy::EResponseStatus>(response.Record.GetStatus())) << " " << response.Record.GetErrorReason() << Endl;
-                    return 1;
-                }
-                return 0;
-            }
-        );
+        AddModifyScheme(&GRpcRequest, modifyScheme);
+
+        return TBase::Run(config);
+    }
+
+    virtual void PrintResponse(const Ydb::Operations::Operation &response) override {
+        if (response.status() != Ydb::StatusIds::SUCCESS) {
+            TBase::PrintResponse(response);
+        }
     }
 };
 
-class TClientCommandSchemaUserAttributeDel: public TClientCommand {
+class TClientCommandSchemaUserAttributeDel: public TClientGrpcCommandBaseModifyScheme {
+    using TBase = TClientGrpcCommandBaseModifyScheme;
     using TUserAttributesLimits = NSchemeShard::TUserAttributesLimits;
 
 public:
     TClientCommandSchemaUserAttributeDel()
-        : TClientCommand("del", {}, "Delete user attribute(s)")
+        : TBase("del", {}, "Delete user attribute(s)")
     {}
 
     virtual void Config(TConfig& config) override {
-        TClientCommand::Config(config);
+        TBase::Config(config);
+
         config.SetFreeArgsMin(2);
         SetFreeArgTitle(0, "<PATH>", "Full pathname of an object (e.g. /ru/home/user/mydb/test1/test2).\n"
             "            Or short pathname if profile path is set (e.g. test1/test2).");
         SetFreeArgTitle(1, "<ATTRIBUTE>", "NAME");
     }
 
-    TString Base;
+    TString WorkingDir;
     TString Name;
     TSet<TString> Attributes;
 
     virtual void Parse(TConfig& config) override {
-        TClientCommand::Parse(config);
+        TBase::Parse(config);
 
-        std::tie(Base, Name) = SplitPath(config, config.ParseResult->GetFreeArgs()[0]);
+        std::tie(WorkingDir, Name) = SplitPath(config, config.ParseResult->GetFreeArgs()[0]);
 
         for (ui32 i = 1; i < config.ParseResult->GetFreeArgCount(); ++i) {
             TString key = config.ParseResult->GetFreeArgs()[i];
@@ -1204,12 +1221,10 @@ public:
     }
 
     virtual int Run(TConfig& config) override {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        NKikimrClient::TSchemeOperation& record(request->Record);
+        NKikimrSchemeOp::TModifyScheme modifyScheme;
 
-        auto& modifyScheme = *record.MutableTransaction()->MutableModifyScheme();
         modifyScheme.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterUserAttributes);
-        modifyScheme.SetWorkingDir(Base);
+        modifyScheme.SetWorkingDir(WorkingDir);
 
         auto& alter = *modifyScheme.MutableAlterUserAttributes();
         alter.SetPathName(Name);
@@ -1220,15 +1235,15 @@ public:
             attribute.SetKey(key);
         }
 
-        return MessageBusCall<NMsgBusProxy::TBusSchemeOperation, NMsgBusProxy::TBusResponse>(config, request,
-            [](const NMsgBusProxy::TBusResponse& response) -> int {
-                if (response.Record.GetStatus() != NMsgBusProxy::MSTATUS_OK) {
-                    Cerr << ToCString(static_cast<NMsgBusProxy::EResponseStatus>(response.Record.GetStatus())) << " " << response.Record.GetErrorReason() << Endl;
-                    return 1;
-                }
-                return 0;
-            }
-        );
+        AddModifyScheme(&GRpcRequest, modifyScheme);
+
+        return TBase::Run(config);
+    }
+
+    virtual void PrintResponse(const Ydb::Operations::Operation &response) override {
+        if (response.status() != Ydb::StatusIds::SUCCESS) {
+            TBase::PrintResponse(response);
+        }
     }
 };
 
@@ -1249,9 +1264,9 @@ TClientCommandSchemaLite::TClientCommandSchemaLite()
     AddCommand(std::make_unique<TClientCommandSchemaExec>());
     AddCommand(std::make_unique<TClientCommandSchemaDescribe>());
     AddCommand(std::make_unique<TClientCommandSchemaLs>());
-    AddCommand(std::make_unique<TClientCommandSchemaMkdir>());
+    AddCommand(std::make_unique<NYdb::NConsoleClient::TCommandMakeDirectory>());
     AddCommand(std::make_unique<TClientCommandSchemaDrop>());
-    AddCommand(std::make_unique<TClientCommandSchemaChown>());
+    AddCommand(std::make_unique<NYdb::NConsoleClient::TCommandChangeOwner>());
     AddCommand(std::make_unique<TClientCommandSchemaAccess>());
     AddCommand(std::make_unique<TClientCommandSchemaTable>());
     AddCommand(std::make_unique<TClientCommandSchemaUserAttribute>());

@@ -135,7 +135,7 @@ message ModifyPermissionsResponse {
 
 message ModifySchemeRequest {
     Ydb.Operations.OperationParams operation_params = 1;
-    repeated bytes modify_schemes = 2;
+    string modify_scheme_text = 2;
 }
 
 message ModifySchemeResult {

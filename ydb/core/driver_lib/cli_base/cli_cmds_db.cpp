@@ -67,9 +67,12 @@ using TClientGrpcCommandBaseModifyScheme = TClientGRpcCommand<
     &Ydb::Scheme::V1::SchemeService::Stub::AsyncModifyScheme
 >;
 
+void AddModifyScheme(Ydb::Scheme::ModifySchemeRequest *request, const TString& text) {
+    request->set_modify_scheme_text(text);
+}
+
 void AddModifyScheme(Ydb::Scheme::ModifySchemeRequest *request, const NKikimrSchemeOp::TModifyScheme& proto) {
-    TString& serializedField = *request->add_modify_schemes();
-    Y_PROTOBUF_SUPPRESS_NODISCARD proto.SerializeToString(&serializedField);
+    ::google::protobuf::TextFormat::PrintToString(proto, request->mutable_modify_scheme_text());
 }
 
 std::optional<NKikimrSchemeOp::EOperationType> EntryTypeToDropOperationType(NYdb::NScheme::ESchemeEntryType entryType) {
@@ -182,13 +185,14 @@ public:
 
 class TClientCommandSchemaExec : public TClientGrpcCommandBaseModifyScheme {
     using TBase = TClientGrpcCommandBaseModifyScheme;
+    using EVerbosityLevel = NYdb::NConsoleClient::TClientCommand::TConfig::EVerbosityLevel;
 
 public:
 
     bool ShowTxId = false;
-    bool Verbose = false;
+    EVerbosityLevel VerbosityLevel;
 
-    NKikimrSchemeOp::TModifyScript ModifySchemeScript;
+    TString ModifySchemeText;
 
     TClientCommandSchemaExec()
         : TBase("execute", { "exec" }, "Execute ModifyScheme protobuf")
@@ -198,21 +202,30 @@ public:
         TBase::Config(config);
 
         config.Opts->AddLongOption('t', "txid", "Print TxId").NoArgument().SetFlag(&ShowTxId);
-        config.Opts->AddLongOption('v', "verbose", "Verbose output").NoArgument().SetFlag(&Verbose);
         config.SetFreeArgsNum(1);
         SetFreeArgTitle(0, "<PBTXT|FILE>", "ModifyScheme protobuf text or file to read it from");
+
+        VerbosityLevel = config.VerbosityLevel;
     }
 
     virtual void Parse(TConfig& config) override {
         TBase::Parse(config);
 
-        TClientCommandBase::ParseProtobuf(&ModifySchemeScript, config.ParseResult->GetFreeArgs()[0]);
+        auto arg = config.ParseResult->GetFreeArgs()[0];
+        if (TClientCommandBase::IsProtobuf(arg)) {
+            ModifySchemeText = arg;
+        } else {
+            TMappedFileInput fileInput(arg);
+            ModifySchemeText = fileInput.ReadAll();
+
+            if (!TClientCommandBase::IsProtobuf(ModifySchemeText)) {
+                throw yexception() << "empty ModifyScheme protobuf";
+            }
+        }
     }
 
     virtual int Run(TConfig& config) override {
-        for (const auto& i : ModifySchemeScript.GetModifyScheme()) {
-            AddModifyScheme(&GRpcRequest, i);
-        }
+        AddModifyScheme(&GRpcRequest, ModifySchemeText);
 
         return TBase::Run(config);
     }
@@ -224,7 +237,7 @@ public:
             if (ShowTxId) {
                 Ydb::Scheme::ModifySchemeResult result;
                 response.result().UnpackTo(&result);
-                if (Verbose) {
+                if (VerbosityLevel > EVerbosityLevel::NONE) {
                     Cout << "TxId: " << (result.tx_id().empty() ? "not returned" : result.tx_id()) << Endl;
                 } else {
                     Cout << result.tx_id() << Endl;

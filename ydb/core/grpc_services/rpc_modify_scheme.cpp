@@ -8,8 +8,47 @@
 #include <ydb/core/grpc_services/base/base.h>
 #include <ydb/public/api/protos/ydb_scheme.pb.h>
 
+#include <google/protobuf/io/tokenizer.h>
+
 namespace NKikimr {
 namespace NGRpcService {
+
+namespace {
+
+bool IsProtobufText(const TString& text) {
+    return text.empty() || text.find('{') != TString::npos;
+}
+struct TErrorCollector : ::google::protobuf::io::ErrorCollector {
+    std::vector<std::string> errors;
+
+    void AddError(int line, int column, const TString& message) override {
+        errors.push_back(TStringBuilder() << "parse error, at " << line << ":" << column << ": " << message);
+    }
+    void AddWarning(int line, int column, const TString& message) override {
+        errors.push_back(TStringBuilder() << "parse warning, at " << line << ":" << column << ": " << message);
+    }
+};
+
+bool ParseProtobufText(NKikimrSchemeOp::TModifyScheme* proto, std::vector<std::string>* parseErrors, const TString& text) {
+    if (!IsProtobufText(text)) {
+        return false;
+    }
+
+    bool parseOk = false;
+    TErrorCollector errorCollector;
+    {
+        ::google::protobuf::TextFormat::Parser parser;
+        parser.RecordErrorsTo(&errorCollector);
+        parseOk = parser.ParseFromString(text, proto);
+    }
+    if (!parseOk) {
+        *parseErrors = std::move(errorCollector.errors);
+    }
+
+    return parseOk;
+}
+
+}  // anonymous namespace
 
 using namespace NActors;
 using namespace Ydb;
@@ -37,32 +76,20 @@ private:
     void SendProposeRequest(const TActorContext &ctx) {
         const auto req = GetProtoRequest();
 
+        if (req->modify_scheme_text().size() == 0) {
+            Request_->RaiseIssue(NYql::TIssue("error: empty modify_scheme_text field"));
+            return Reply(StatusIds::BAD_REQUEST, ctx);
+        }
+
         auto proposeRequest = TBase::CreateProposeTransaction();
-        auto& record = proposeRequest->Record;
-        auto& transaction = *record.MutableTransaction();
+        NKikimrSchemeOp::TModifyScheme* modifyScheme = proposeRequest->Record.MutableTransaction()->MutableModifyScheme();
 
-        if (req->modify_schemes_size() == 0) {
-            Request_->RaiseIssue(NYql::TIssue("Emply modify_schemes field"));
-            return Reply(StatusIds::BAD_REQUEST, ctx);
-        }
-
-        std::vector<NKikimrSchemeOp::TModifyScheme> modify_schemes;
-        bool parseOk = true;
-        {
-            NKikimrSchemeOp::TModifyScheme proto;
-            for (int i = 0; i < req->modify_schemes_size() && parseOk; ++i) {
-                if (parseOk = proto.ParseFromString(req->modify_schemes(i))) {
-                    modify_schemes.push_back(proto);
-                }
+        std::vector<std::string> errors;
+        if (!ParseProtobufText(modifyScheme, &errors, req->modify_scheme_text())) {
+            for (const auto& i : errors) {
+                Request_->RaiseIssue(NYql::TIssue{i});
             }
-        }
-        if (!parseOk) {
-            Request_->RaiseIssue(NYql::TIssue("Invalid modify_schemes protos"));
             return Reply(StatusIds::BAD_REQUEST, ctx);
-        }
-
-        for (auto& i : modify_schemes) {
-            *transaction.AddTransactionalModification() = i;
         }
 
         ctx.Send(MakeTxProxyID(), proposeRequest.release());

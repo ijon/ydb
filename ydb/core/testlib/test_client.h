@@ -34,6 +34,8 @@
 #include <ydb/library/yql/providers/s3/actors_factory/yql_s3_actors_factory.h>
 
 #include <ydb/library/grpc/server/grpc_server.h>
+#include <ydb/library/grpc/client/grpc_common.h>
+#include <ydb/library/grpc/client/grpc_client_low.h>
 
 #include <google/protobuf/text_format.h>
 
@@ -104,7 +106,7 @@ namespace Tests {
         using TLoggerInitializer = std::function<void (TTestActorRuntime&)>;
         using TStoragePoolKinds = TDomainsInfo::TDomain::TStoragePoolKinds;
 
-        ui16 Port;
+        ui16 MsgbusPort = 0;
         ui16 GrpcPort = 0;
         int GrpcMaxMessageSize = 0;  // 0 - default (4_MB), -1 - no limit
         ui16 MonitoringPortOffset = 0;
@@ -232,8 +234,9 @@ namespace Tests {
             return *this;
         }
 
-        explicit TServerSettings(ui16 port, const NKikimrProto::TAuthConfig authConfig = {}, const NKikimrPQ::TPQConfig pqConfig = {})
-            : Port(port)
+        explicit TServerSettings(ui16 msgbusPort, ui16 grpcPort, const NKikimrProto::TAuthConfig authConfig = {}, const NKikimrPQ::TPQConfig pqConfig = {})
+            : MsgbusPort(msgbusPort)
+            , GrpcPort(grpcPort)
             , AuthConfig(authConfig)
             , PQConfig(pqConfig)
         {
@@ -372,11 +375,6 @@ namespace Tests {
                 request->Record.SetSecurityToken(SecurityToken);
         }
 
-        void PrepareRequest(TAutoPtr<NMsgBusProxy::TBusSchemeOperation>& request) {
-            if (!SecurityToken.empty())
-                request->Record.SetSecurityToken(SecurityToken);
-        }
-
         void PrepareRequest(TAutoPtr<NMsgBusProxy::TBusSchemeInitRoot>& request) {
             if (!SecurityToken.empty())
                 request->Record.SetSecurityToken(SecurityToken);
@@ -413,56 +411,56 @@ namespace Tests {
         void InitRootScheme(const TString& root);
 
         // Flat DB operations
-        NMsgBusProxy::EResponseStatus WaitCreateTx(TTestActorRuntime* runtime, const TString& path, TDuration timeout);
-        NMsgBusProxy::EResponseStatus MkDir(const TString& parent, const TString& name, const TApplyIf& applyIf = {});
-        NMsgBusProxy::EResponseStatus RmDir(const TString& parent, const TString& name, const TApplyIf& applyIf = {});
-        NMsgBusProxy::EResponseStatus CreateSubdomain(const TString &parent, const TString &description);
-        NMsgBusProxy::EResponseStatus CreateSubdomain(const TString& parent, const NKikimrSubDomains::TSubDomainSettings &subdomain);
-        NMsgBusProxy::EResponseStatus CreateExtSubdomain(const TString &parent, const TString &description);
-        NMsgBusProxy::EResponseStatus CreateExtSubdomain(const TString& parent, const NKikimrSubDomains::TSubDomainSettings &subdomain);
-        NMsgBusProxy::EResponseStatus AlterExtSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain, TDuration timeout = TDuration::Seconds(5000));
-        NMsgBusProxy::EResponseStatus AlterUserAttributes(const TString &parent, const TString &name, const TVector<std::pair<TString, TString>>& addAttrs, const TVector<TString>& dropAttrs = {}, const TApplyIf& applyIf = {});
-        NMsgBusProxy::EResponseStatus AlterSubdomain(const TString &parent, const TString &description, TDuration timeout = TDuration::Seconds(5000));
-        NMsgBusProxy::EResponseStatus AlterSubdomain(const TString& parent, const NKikimrSubDomains::TSubDomainSettings &subdomain, TDuration timeout = TDuration::Seconds(5000));
-        NMsgBusProxy::EResponseStatus DeleteSubdomain(const TString& parent, const TString &name);
-        NMsgBusProxy::EResponseStatus ForceDeleteSubdomain(const TString& parent, const TString &name);
-        NMsgBusProxy::EResponseStatus ForceDeleteUnsafe(const TString& parent, const TString &name);
-        NMsgBusProxy::EResponseStatus CreateUser(const TString& parent, const TString& user, const TString& password);
+        Ydb::StatusIds::StatusCode WaitCreateTx(TTestActorRuntime* runtime, const TString& path, TDuration timeout);
+        Ydb::StatusIds::StatusCode MkDir(const TString& parent, const TString& name/*, const TApplyIf& applyIf = {}*/);
+        Ydb::StatusIds::StatusCode RmDir(const TString& parent, const TString& name/*, const TApplyIf& applyIf = {}*/);
+        Ydb::StatusIds::StatusCode CreateSubdomain(const TString &parent, const TString &description);
+        Ydb::StatusIds::StatusCode CreateSubdomain(const TString& parent, const NKikimrSubDomains::TSubDomainSettings &subdomain);
+        Ydb::StatusIds::StatusCode CreateExtSubdomain(const TString &parent, const TString &description);
+        Ydb::StatusIds::StatusCode CreateExtSubdomain(const TString& parent, const NKikimrSubDomains::TSubDomainSettings &subdomain);
+        Ydb::StatusIds::StatusCode AlterExtSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain, TDuration timeout = TDuration::Seconds(5000));
+        Ydb::StatusIds::StatusCode AlterUserAttributes(const TString &parent, const TString &name, const TVector<std::pair<TString, TString>>& addAttrs, const TVector<TString>& dropAttrs = {}, const TApplyIf& applyIf = {});
+        Ydb::StatusIds::StatusCode AlterSubdomain(const TString &parent, const TString &description, TDuration timeout = TDuration::Seconds(5000));
+        Ydb::StatusIds::StatusCode AlterSubdomain(const TString& parent, const NKikimrSubDomains::TSubDomainSettings &subdomain, TDuration timeout = TDuration::Seconds(5000));
+        Ydb::StatusIds::StatusCode DeleteSubdomain(const TString& parent, const TString &name);
+        Ydb::StatusIds::StatusCode ForceDeleteSubdomain(const TString& parent, const TString &name);
+        Ydb::StatusIds::StatusCode ForceDeleteUnsafe(const TString& parent, const TString &name);
+        Ydb::StatusIds::StatusCode CreateUser(const TString& parent, const TString& user, const TString& password);
 
-        NMsgBusProxy::EResponseStatus CreateTable(const TString& parent, const TString& scheme, TDuration timeout = TDuration::Seconds(5000));
-        NMsgBusProxy::EResponseStatus CreateTable(const TString& parent, const NKikimrSchemeOp::TTableDescription &table, TDuration timeout = TDuration::Seconds(5000));
-        NMsgBusProxy::EResponseStatus CreateTableWithUniformShardedIndex(const TString& parent,
+        Ydb::StatusIds::StatusCode CreateTable(const TString& parent, const TString& scheme, TDuration timeout = TDuration::Seconds(5000));
+        Ydb::StatusIds::StatusCode CreateTable(const TString& parent, const NKikimrSchemeOp::TTableDescription &table, TDuration timeout = TDuration::Seconds(5000));
+        Ydb::StatusIds::StatusCode CreateTableWithUniformShardedIndex(const TString& parent,
             const NKikimrSchemeOp::TTableDescription &table, const TString& indexName,
             const TVector<TString> indexColumns, NKikimrSchemeOp::EIndexType type,
             const TVector<TString> dataColumns = {}, TDuration timeout = TDuration::Seconds(5000));
-        NMsgBusProxy::EResponseStatus SplitTable(const TString& table, ui64 datashardId, ui64 border, TDuration timeout = TDuration::Seconds(5000));
-        NMsgBusProxy::EResponseStatus CopyTable(const TString& parent, const TString& name, const TString& src);
-        NMsgBusProxy::EResponseStatus CreateKesus(const TString& parent, const TString& name);
-        NMsgBusProxy::EResponseStatus DeleteKesus(const TString& parent, const TString& name);
-        NMsgBusProxy::EResponseStatus ConsistentCopyTables(TVector<std::pair<TString, TString>> desc, TDuration timeout = TDuration::Seconds(5000));
-        NMsgBusProxy::EResponseStatus DeleteTable(const TString& parent, const TString& name);
-        NMsgBusProxy::EResponseStatus AlterTable(const TString& parent, const NKikimrSchemeOp::TTableDescription& update);
-        NMsgBusProxy::EResponseStatus AlterTable(const TString& parent, const TString& alter);
+        Ydb::StatusIds::StatusCode SplitTable(const TString& table, ui64 datashardId, ui64 border, TDuration timeout = TDuration::Seconds(5000));
+        Ydb::StatusIds::StatusCode CopyTable(const TString& parent, const TString& name, const TString& src);
+        Ydb::StatusIds::StatusCode CreateKesus(const TString& parent, const TString& name);
+        Ydb::StatusIds::StatusCode DeleteKesus(const TString& parent, const TString& name);
+        Ydb::StatusIds::StatusCode ConsistentCopyTables(TVector<std::pair<TString, TString>> desc, TDuration timeout = TDuration::Seconds(5000));
+        Ydb::StatusIds::StatusCode DeleteTable(const TString& parent, const TString& name);
+        Ydb::StatusIds::StatusCode AlterTable(const TString& parent, const NKikimrSchemeOp::TTableDescription& update);
+        Ydb::StatusIds::StatusCode AlterTable(const TString& parent, const TString& alter);
         TAutoPtr<NMsgBusProxy::TBusResponse> AlterTable(const TString& parent, const NKikimrSchemeOp::TTableDescription& update, const TString& userToken);
         TAutoPtr<NMsgBusProxy::TBusResponse> AlterTable(const TString& parent, const TString& alter, const TString& userToken);
 
         TAutoPtr<NMsgBusProxy::TBusResponse> MoveIndex(const TString& table, const TString& src, const TString& dst, bool allowOverwrite, const TString& userToken);
 
-        NMsgBusProxy::EResponseStatus CreateOlapStore(const TString& parent, const TString& scheme);
-        NMsgBusProxy::EResponseStatus CreateOlapStore(const TString& parent, const NKikimrSchemeOp::TColumnStoreDescription& store);
-        NMsgBusProxy::EResponseStatus CreateColumnTable(const TString& parent, const TString& scheme);
-        NMsgBusProxy::EResponseStatus CreateColumnTable(const TString& parent, const NKikimrSchemeOp::TColumnTableDescription& table);
+        Ydb::StatusIds::StatusCode CreateOlapStore(const TString& parent, const TString& scheme);
+        Ydb::StatusIds::StatusCode CreateOlapStore(const TString& parent, const NKikimrSchemeOp::TColumnStoreDescription& store);
+        Ydb::StatusIds::StatusCode CreateColumnTable(const TString& parent, const TString& scheme);
+        Ydb::StatusIds::StatusCode CreateColumnTable(const TString& parent, const NKikimrSchemeOp::TColumnTableDescription& table);
 #if 1 // legacy names
-        NMsgBusProxy::EResponseStatus CreateOlapTable(const TString& parent, const TString& scheme) {
+        Ydb::StatusIds::StatusCode CreateOlapTable(const TString& parent, const TString& scheme) {
             return CreateColumnTable(parent, scheme);
         }
-        NMsgBusProxy::EResponseStatus CreateOlapTable(const TString& parent, const NKikimrSchemeOp::TColumnTableDescription& table) {
+        Ydb::StatusIds::StatusCode CreateOlapTable(const TString& parent, const NKikimrSchemeOp::TColumnTableDescription& table) {
             return CreateColumnTable(parent, table);
         }
 #endif
-        NMsgBusProxy::EResponseStatus CreateSolomon(const TString& parent, const TString& name, ui32 parts = 4, ui32 channelProfile = 0);
-        NMsgBusProxy::EResponseStatus StoreTableBackup(const TString& parent, const NKikimrSchemeOp::TBackupTask& task);
-        NMsgBusProxy::EResponseStatus DeleteTopic(const TString& parent, const TString& name);
+        Ydb::StatusIds::StatusCode CreateSolomon(const TString& parent, const TString& name, ui32 parts = 4, ui32 channelProfile = 0);
+        Ydb::StatusIds::StatusCode StoreTableBackup(const TString& parent, const NKikimrSchemeOp::TBackupTask& task);
+        Ydb::StatusIds::StatusCode DeleteTopic(const TString& parent, const TString& name);
         TAutoPtr<NMsgBusProxy::TBusResponse> TryDropPersQueueGroup(const TString& parent, const TString& name);
         TAutoPtr<NMsgBusProxy::TBusResponse> Ls(const TString& path);
         static TPathVersion ExtractPathVersion(const TAutoPtr<NMsgBusProxy::TBusResponse>& describe);
@@ -594,12 +592,20 @@ namespace Tests {
         const TStoragePoolKinds StoragePoolTypes;
         NScheme::TKikimrTypeRegistry TypeRegistry;
         TIntrusivePtr<NMiniKQL::IFunctionRegistry> FunctionRegistry;
-        NMsgBusProxy::TMsgBusClientConfig ClientConfig;
-        std::shared_ptr<NMsgBusProxy::TMsgBusClient> Client;
         TMaybe<ui64> TypesEtag;
         NScheme::TTypeMetadataRegistry LoadedTypeMetadataRegistry;
         TIntrusivePtr<NMiniKQL::IFunctionRegistry> LoadedFunctionRegistry;
         TString SecurityToken;
+
+        // Msgbus stuff.
+        // Deprecated and in state of moving out of use in favor of grcp client
+        NMsgBusProxy::TMsgBusClientConfig ClientConfig;
+        std::shared_ptr<NMsgBusProxy::TMsgBusClient> Client;
+
+        // Grpc stuff
+        NYdbGrpc::TGRpcClientConfig GrpcClientConfig;
+        std::unique_ptr<NYdbGrpc::TGRpcClientLow> GrpcClient;
+        std::unique_ptr<NYdbGrpc::TServiceConnection<Ydb::Scheme::V1::SchemeService>> SchemeServiceConn;
     };
 
     struct TTenants {

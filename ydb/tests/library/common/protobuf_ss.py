@@ -5,8 +5,10 @@ import string
 from datetime import timedelta
 from os.path import basename, dirname, join
 
-from ydb.core.protos import msgbus_pb2
 from ydb.core.protos import flat_scheme_op_pb2
+from ydb.core.protos import msgbus_pb2
+from ydb.public.api.protos import ydb_scheme_pb2 as ydb_scheme
+
 from ydb.tests.library.common.protobuf import AbstractProtobufBuilder, build_protobuf_if_necessary
 
 
@@ -15,7 +17,7 @@ DEFAULT_SIZE_TO_SPLIT = 10 ** 6
 
 class TPartitionConfig(AbstractProtobufBuilder):
     """
-    See /arcadia/ydb/core/protos/flat_scheme_op_pb2.proto
+    See ydb/core/protos/flat_scheme_op.proto
     """
 
     def __init__(self):
@@ -88,7 +90,7 @@ class TPartitionConfig(AbstractProtobufBuilder):
 
 class CreatePath(AbstractProtobufBuilder):
     def __init__(self, work_dir, name=None):
-        super(CreatePath, self).__init__(msgbus_pb2.TSchemeOperation())
+        super(CreatePath, self).__init__(ydb_scheme.MakeDirectoryRequest())
         if name is None:
             name = basename(work_dir)
             work_dir = dirname(work_dir)
@@ -142,7 +144,7 @@ class RegisterTenant(AbstractProtobufBuilder):
             return self
 
     def __init__(self, work_dir, name=None, options=None):
-        super(RegisterTenant, self).__init__(msgbus_pb2.TSchemeOperation())
+        super(RegisterTenant, self).__init__(ydb_scheme.ModifySchemeRequest())
 
         if name is None:
             name = basename(work_dir)
@@ -187,14 +189,14 @@ def list_of_create_path_builders_from_full_path(full_path):
     return ret
 
 
-class AbstractTSchemeOperationRequest(AbstractProtobufBuilder):
+class AbstractModifySchemeRequest(AbstractProtobufBuilder):
     """
     See
-    /arcadia/ydb/core/protos/msgbus_pb2.proto
-    /arcadia/ydb/core/protos/flat_scheme_op_pb2.proto
+    ydb/core/protos/flat_scheme_op.proto
+    ydb/public/api/protos/ydb_scheme.proto
     """
     def __init__(self):
-        super(AbstractTSchemeOperationRequest, self).__init__(msgbus_pb2.TSchemeOperation())
+        super(AbstractModifySchemeRequest, self).__init__(ydb_scheme.ModifySchemeRequest())
 
 
 class _DropPolicyOptions(object):
@@ -226,7 +228,7 @@ class _DropPolicyOptions(object):
         return self
 
 
-class DropTenantRequest(AbstractTSchemeOperationRequest):
+class DropTenantRequest(AbstractModifySchemeRequest):
     class Options(_DropPolicyOptions):
         pass
 
@@ -260,7 +262,7 @@ class ForceDropTenantRequest(DropTenantRequest):
         self.protobuf.Transaction.ModifyScheme.OperationType = flat_scheme_op_pb2.ESchemeOpForceDropSubDomain
 
 
-class DropPathRequest(AbstractTSchemeOperationRequest):
+class DropPathRequest(AbstractModifySchemeRequest):
     class Options(_DropPolicyOptions):
         pass
 
@@ -288,7 +290,7 @@ class DropPathRequest(AbstractTSchemeOperationRequest):
         return self
 
 
-class DropTopicRequest(AbstractTSchemeOperationRequest):
+class DropTopicRequest(AbstractModifySchemeRequest):
     class Options(_DropPolicyOptions):
         pass
 
@@ -321,7 +323,7 @@ class DropTopicRequest(AbstractTSchemeOperationRequest):
         return self
 
 
-class CreateTopicRequest(AbstractTSchemeOperationRequest):
+class CreateTopicRequest(AbstractModifySchemeRequest):
     class Options(object):
         def __init__(self):
             self.__partition_count = 10
@@ -452,7 +454,7 @@ class AlterTopicRequest(CreateTopicRequest):
 
 class DropPath(AbstractProtobufBuilder):
     def __init__(self, work_dir, name=None, drop_policy=flat_scheme_op_pb2.EDropFailOnChanges):
-        super(DropPath, self).__init__(msgbus_pb2.TSchemeOperation())
+        super(DropPath, self).__init__(ydb_scheme.ModifySchemeRequest())
         if name is None:
             name = basename(work_dir)
             work_dir = dirname(work_dir)
@@ -462,7 +464,7 @@ class DropPath(AbstractProtobufBuilder):
         self.protobuf.Transaction.ModifyScheme.Drop.WaitPolicy = drop_policy
 
 
-class CreateTableRequest(AbstractTSchemeOperationRequest):
+class CreateTableRequest(AbstractModifySchemeRequest):
     class Options(object):
         ColumnStorage1 = flat_scheme_op_pb2.ColumnStorage1
         ColumnStorage2 = flat_scheme_op_pb2.ColumnStorage2
@@ -650,7 +652,7 @@ class CreateTableRequest(AbstractTSchemeOperationRequest):
         return self
 
 
-class AlterTableRequest(AbstractTSchemeOperationRequest):
+class AlterTableRequest(AbstractModifySchemeRequest):
     def __init__(self, path, table_name):
         super(AlterTableRequest, self).__init__()
         self.__column_ids = itertools.count(start=1)
@@ -691,7 +693,7 @@ class AlterTableRequest(AbstractTSchemeOperationRequest):
         return self
 
 
-class DropTableRequest(AbstractTSchemeOperationRequest):
+class DropTableRequest(AbstractModifySchemeRequest):
     class Options(_DropPolicyOptions):
         pass
 
@@ -731,7 +733,7 @@ class SchemeOperationStatus(AbstractProtobufBuilder):
 TSchemeOperationStatus = SchemeOperationStatus
 
 
-class CopyTableRequest(AbstractTSchemeOperationRequest):
+class CopyTableRequest(AbstractModifySchemeRequest):
     def __init__(self, source_table_full_name, destination_path, destination_name):
         super(CopyTableRequest, self).__init__()
         self.protobuf.Transaction.ModifyScheme.OperationType = flat_scheme_op_pb2.ESchemeOpCreateTable

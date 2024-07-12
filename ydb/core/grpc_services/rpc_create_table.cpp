@@ -154,7 +154,7 @@ private:
         const auto& workingDir = pathPair.first;
         const auto& name = pathPair.second;
         if (!req->columnsSize()) {
-            auto issue = NYql::TIssue("At least one column shoult be in table");
+            auto issue = NYql::TIssue("At least one column should be in table");
             Request_->RaiseIssue(issue);
             return Reply(StatusIds::BAD_REQUEST, ctx);
         }

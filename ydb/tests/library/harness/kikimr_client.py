@@ -2,22 +2,21 @@
 # -*- coding: utf-8 -*-
 import time
 import os
-
-from ydb.tests.library.common.msgbus_types import MessageBusStatus
-from ydb.tests.library.common.protobuf_ss import TSchemeOperationStatus
-
-import grpc
 import six
-
+from collections import namedtuple
 from google.protobuf.text_format import Parse
+import grpc
+
 from ydb.core.protos import blobstorage_config_pb2
 import ydb.core.protos.msgbus_pb2 as msgbus
 import ydb.core.protos.msgbus_kv_pb2 as msgbus_kv
-import ydb.core.protos.flat_scheme_op_pb2 as flat_scheme_op_pb2
-import ydb.core.protos.grpc_pb2_grpc as grpc_server
-from ydb.core.protos import flat_scheme_op_pb2 as flat_scheme_op
+import ydb.core.protos.flat_scheme_op as flat_scheme_op
+import ydb.core.protos.grpc_pb2_grpc as legacy_service
 from ydb.public.api.protos.ydb_status_codes_pb2 import StatusIds
-from collections import namedtuple
+import ydb.public.api.protos.ydb_scheme_v1 as scheme_service
+
+from ydb.tests.library.common.msgbus_types import MessageBusStatus
+from ydb.tests.library.common.protobuf_ss import TSchemeOperationStatus
 
 
 class FlatTxId(namedtuple('FlatTxId', ['tx_id', 'schemeshard_tablet_id'])):
@@ -30,10 +29,7 @@ class FlatTxId(namedtuple('FlatTxId', ['tx_id', 'schemeshard_tablet_id'])):
 
 
 def kikimr_client_factory(server, port, cluster=None, retry_count=1):
-    return KiKiMRMessageBusClient(
-        server, port, cluster=cluster,
-        retry_count=retry_count
-    )
+    return YdbClient(server, port, cluster=cluster, retry_count=retry_count)
 
 
 def channels_list():
@@ -51,21 +47,75 @@ def to_bytes(v):
             raise ValueError(str(e), type(v))
     return v
 
-
-class KiKiMRMessageBusClient(object):
+class YdbClient(object):
     def __init__(self, server, port, cluster=None, retry_count=1):
         self.server = server
         self.port = port
         self._cluster = cluster
         self.__domain_id = 1
         self.__retry_count = retry_count
-        self.__retry_sleep_seconds = 10
+        self.__retry_sleep_seconds = 10  #FIXME: 10 seconds seems to be too much
         self._options = [
             ('grpc.max_receive_message_length', 64 * 10 ** 6),
             ('grpc.max_send_message_length', 64 * 10 ** 6)
         ]
         self._channel = grpc.insecure_channel("%s:%s" % (self.server, self.port), options=self._options)
-        self._stub = grpc_server.TGRpcServerStub(self._channel)
+
+        self._legacy_service_stub = legacy_service.TGRpcServerStub(self._channel)
+        self._scheme_service_stub = scheme_service.SchemeServiceStub(self._channel)
+
+    def close(self):
+        self._channel.close()
+
+    def __del__(self):
+        self.close()
+
+    def _call_with_retries(self, callee, request):
+        retry_count = self.__retry_count
+        while True:
+            try:
+                return callee(request)
+            except (RuntimeError, grpc.RpcError):
+                retry_count -= 1
+                if retry_count == 0:
+                    raise
+                #FIXME: log retry -- to see if there many
+                time.sleep(self.__retry_sleep_seconds)
+
+    def _call_service(self, service_stub, method_name, request):
+        callee = getattr(service_stub, method_name)
+        return self._call_with_retries(callee, request)
+
+    def invoke(self, request, method_name):
+        return self._call_service(self._legacy_service_stub, method_name, request)
+
+    send = invoke
+
+    def send_and_poll_request(self, request, method='SchemeOperation'):
+        response = self.invoke(request, method)
+        return self.__poll(response)
+
+    def __poll(self, flat_transaction_response):
+        if not MessageBusStatus.is_ok_status(flat_transaction_response.Status):
+            return flat_transaction_response
+
+        return self.invoke(
+            TSchemeOperationStatus(
+                flat_transaction_response.FlatTxId.TxId,
+                flat_transaction_response.FlatTxId.SchemeShardTabletId
+            ).protobuf,
+            'SchemeOperationStatus'
+        )
+
+    def flat_transaction_status(self, tx_id, tablet_id, timeout=120):
+        request = msgbus.TSchemeOperationStatus()
+        request.FlatTxId.TxId = tx_id
+        request.FlatTxId.SchemeShardTabletId = tablet_id
+        request.PollOptions.Timeout = timeout * 1000
+        return self.invoke(request, 'SchemeOperationStatus')
+
+    def ddl_exec_status(self, flat_tx_id):
+        return self.flat_transaction_status(flat_tx_id.tx_id, flat_tx_id.schemeshard_tablet_id)
 
     def describe(self, path, token):
         request = msgbus.TSchemeDescribe()
@@ -73,26 +123,6 @@ class KiKiMRMessageBusClient(object):
         request.SecurityToken = token
         request.Options.ReturnPartitioningInfo = False
         return self.send(request, 'SchemeDescribe')
-
-    def _get_invoke_callee(self, method):
-        return getattr(self._stub, method)
-
-    def invoke(self, request, method):
-        retry = self.__retry_count
-        while True:
-            try:
-                callee = self._get_invoke_callee(method)
-                return callee(request)
-            except (RuntimeError, grpc.RpcError):
-                retry -= 1
-
-                if not retry:
-                    raise
-
-                time.sleep(self.__retry_sleep_seconds)
-
-    def close(self):
-        self._channel.close()
 
     def update_self_heal(self, enable, domain=1):
         request = msgbus.TBlobStorageConfigRequest()
@@ -122,25 +152,6 @@ class KiKiMRMessageBusClient(object):
         command.UpdateDriveStatus.Status = status
         return self.send(request, 'BlobStorageConfig')
 
-    def send_request(self, protobuf_request, method=None):
-        return self.send(protobuf_request, method)
-
-    def send_and_poll_request(self, protobuf_request, method='SchemeOperation'):
-        response = self.send_request(protobuf_request, method)
-        return self.__poll(response)
-
-    def __poll(self, flat_transaction_response):
-        if not MessageBusStatus.is_ok_status(flat_transaction_response.Status):
-            return flat_transaction_response
-
-        return self.send_request(
-            TSchemeOperationStatus(
-                flat_transaction_response.FlatTxId.TxId,
-                flat_transaction_response.FlatTxId.SchemeShardTabletId
-            ).protobuf,
-            'SchemeOperationStatus'
-        )
-
     def bind_storage_pools(self, domain_name, spools):
         request = msgbus.TSchemeOperation()
         scheme_transaction = request.Transaction
@@ -159,22 +170,9 @@ class KiKiMRMessageBusClient(object):
             )
         )
 
-    def flat_transaction_status(self, tx_id, tablet_id, timeout=120):
-        request = msgbus.TSchemeOperationStatus()
-        request.FlatTxId.TxId = tx_id
-        request.FlatTxId.SchemeShardTabletId = tablet_id
-        request.PollOptions.Timeout = timeout * 1000
-        return self.invoke(request, 'SchemeOperationStatus')
-
-    def send(self, request, method):
-        return self.invoke(request, method)
-
-    def ddl_exec_status(self, flat_tx_id):
-        return self.flat_transaction_status(flat_tx_id.tx_id, flat_tx_id.schemeshard_tablet_id)
-
     def add_attr(self, working_dir, name, attributes, token=None):
         request = msgbus.TSchemeOperation()
-        request.Transaction.ModifyScheme.OperationType = flat_scheme_op_pb2.ESchemeOpAlterUserAttributes
+        request.Transaction.ModifyScheme.OperationType = flat_scheme_op.ESchemeOpAlterUserAttributes
         request.Transaction.ModifyScheme.WorkingDir = working_dir
         request.Transaction.ModifyScheme.AlterUserAttributes.PathName = name
 
@@ -362,6 +360,3 @@ class KiKiMRMessageBusClient(object):
             request.TabletIDs.extend(tablet_ids)
         request.Alive = True
         return self.invoke(request, 'TabletStateRequest')
-
-    def __del__(self):
-        self.close()

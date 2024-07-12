@@ -212,7 +212,9 @@ namespace Tests {
 
         SetupLogging();
 
-        SetupMessageBus(Settings->Port);
+        SetupMessageBus(Settings->MsgbusPort);
+        EnableGRpc(Settings->GrpcPort);
+
         SetupDomains(app);
 
         app.AddHive(ChangeStateStorage(Hive, Settings->Domain));
@@ -1256,7 +1258,7 @@ namespace Tests {
         if (SupportsRedirect && Tests::IsServerRedirected()) {
             serverSetup = GetServerSetup();
         } else {
-            serverSetup = TServerSetup("localhost", settings.Port);
+            serverSetup = TServerSetup("localhost", settings.MsgbusPort);
         }
 
         ClientConfig.Ip = serverSetup.IpAddress;
@@ -1267,7 +1269,16 @@ namespace Tests {
         Client.reset(new NMsgBusProxy::TMsgBusClient(ClientConfig));
         Client->Init();
 
-        Cerr << "TClient is connected to server " << ClientConfig.Ip << ":" << ClientConfig.Port << Endl;
+        //FIXME: add support for server redirect?
+        GrpcClientConfig.Locator = serverSetup.IpAddress + ":" + ToString(settings.GrpcPort);
+        // not timeout for now
+        GrpcClient.reset(new NYdbGrpc::TGrpcClient());
+        SchemeServiceConn = GrpcClient->CreateGRpcServiceConnection<Ydb::Scheme::V1::SchemeService>(GrpcClientConfig);
+
+        Cerr << "TClient is connected to server " << ClientConfig.Ip
+             << ", msgbus port " << ClientConfig.Port
+             << ", grpc port " << settings.GrpcPort
+             << Endl;
     }
 
     const NMsgBusProxy::TMsgBusClientConfig& TClient::GetClientConfig() const {
@@ -1276,6 +1287,7 @@ namespace Tests {
 
     TClient::~TClient() {
         Client->Shutdown();
+        GrpcClient->Stop(true);
     }
 
 
@@ -1449,220 +1461,205 @@ namespace Tests {
         return WaitCompletion(txId.GetTxId(), txId.GetSchemeShardTabletId(), txId.GetPathId(), reply, timeout);
     }
 
-    NMsgBusProxy::EResponseStatus TClient::MkDir(const TString& parent, const TString& name, const TApplyIf& applyIf) {
-        NMsgBusProxy::TBusSchemeOperation* request(new NMsgBusProxy::TBusSchemeOperation());
-        auto* mkDirTx = request->Record.MutableTransaction()->MutableModifyScheme();
-        mkDirTx->SetWorkingDir(parent);
-        mkDirTx->SetOperationType(NKikimrSchemeOp::ESchemeOpMkDir);
-        mkDirTx->MutableMkDir()->SetName(name);
-        SetApplyIf(*mkDirTx, applyIf);
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus msgStatus = SendAndWaitCompletion(request, reply);
-        Cout << PrintToString<NMsgBusProxy::TBusResponse>(reply.Get()) << Endl;
-        UNIT_ASSERT_VALUES_EQUAL(msgStatus, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
-    }
+     Ydb::StatusIds::StatusCode SendModifyScheme(const TString& modifySchemeText) {
+        Ydb::Operations::Operation operation;
 
-    NMsgBusProxy::EResponseStatus TClient::RmDir(const TString& parent, const TString& name, const TApplyIf& applyIf) {
-        NMsgBusProxy::TBusSchemeOperation* request(new NMsgBusProxy::TBusSchemeOperation());
-        auto* mkDirTx = request->Record.MutableTransaction()->MutableModifyScheme();
-        mkDirTx->SetWorkingDir(parent);
-        mkDirTx->SetOperationType(NKikimrSchemeOp::ESchemeOpRmDir);
-        mkDirTx->MutableDrop()->SetName(name);
-        SetApplyIf(*mkDirTx, applyIf);
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus msgStatus = SendAndWaitCompletion(request, reply);
-        Cout << PrintToString<NMsgBusProxy::TBusResponse>(reply.Get()) << Endl;
-        UNIT_ASSERT_VALUES_EQUAL(msgStatus, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
-    }
+        NYdbGrpc::TResponseCallback<Ydb::Scheme::ModifySchemeResponse> responseCb =
+            [&operation](NYdbGrpc::TGrpcStatus &grpcStatus, Ydb::Scheme::ModifySchemeResponse &&resp) -> void {
+            if (grpcStatus.Ok()) {
+                operation.CopyFrom(resp.operation());
+            } else {
+                Cerr << "GRPC call error: " << grpcStatus.Msg + " " + grpcStatus.Details << Endl;
+                UNIT_ASSERT(grpcStatus.Ok());
+            }
+        };
 
-    NMsgBusProxy::EResponseStatus TClient::CreateSubdomain(const TString &parent, const TString &description) {
-        NKikimrSubDomains::TSubDomainSettings subdomain;
-        UNIT_ASSERT(::google::protobuf::TextFormat::ParseFromString(description, &subdomain));
-        return CreateSubdomain(parent, subdomain);
-    }
-
-    NMsgBusProxy::EResponseStatus TClient::CreateSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpCreateSubDomain);
-        op->SetWorkingDir(parent);
-        op->MutableSubDomain()->CopyFrom(subdomain);
-
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
-    }
-
-    NMsgBusProxy::EResponseStatus TClient::CreateExtSubdomain(const TString &parent, const TString &description) {
-        NKikimrSubDomains::TSubDomainSettings subdomain;
-        UNIT_ASSERT(::google::protobuf::TextFormat::ParseFromString(description, &subdomain));
-        return CreateExtSubdomain(parent, subdomain);
-    }
-
-    NMsgBusProxy::EResponseStatus TClient::CreateExtSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpCreateExtSubDomain);
-        op->SetWorkingDir(parent);
-        op->MutableSubDomain()->CopyFrom(subdomain);
-
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
-    }
-
-    NMsgBusProxy::EResponseStatus TClient::AlterUserAttributes(const TString &parent, const TString &name, const TVector<std::pair<TString, TString>>& addAttrs, const TVector<TString>& dropAttrs, const TApplyIf& applyIf) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetWorkingDir(parent);
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterUserAttributes);
-        auto userAttributes = op->MutableAlterUserAttributes();
-        userAttributes->SetPathName(name);
-        for (const auto& item: addAttrs) {
-            auto attr = userAttributes->AddUserAttributes();
-            attr->SetKey(item.first);
-            attr->SetValue(item.second);
+        {
+            Ydb::Scheme::ModifySchemeRequest request;
+            request.set_modify_scheme_text(modifySchemeText);
+            SchemeServiceConn->DoRequest(request, std::move(responseCb), &Ydb::Scheme::V1::SchemeService::Stub::AsyncModifyScheme);
         }
-        for (const auto& item: dropAttrs) {
-            auto attr = userAttributes->AddUserAttributes();
-            attr->SetKey(item);
+        //DEBUG:
+        // {
+        //     Ydb::Scheme::ModifySchemeResult result;
+        //     operation.result.UnpackTo(&result);
+        //     Cout << result.tx_id() << Endl;
+        // }
+
+        return operation.status();
+    }
+
+     TString _DescriptionText(NKikimrSchemeOp::EOperationType type, const TString &parent, const TString& field, const TString& description) {
+        return Sprintf(
+            R"(ModifyScheme {
+                OperationType: %s
+                WorkingDir: "%s"
+                %s: %s
+            })",
+            NKikimrSchemeOp::EOperationType_Name(type),
+            parent,
+            field,
+            description
+        );
+    }
+
+     TString _DropText(NKikimrSchemeOp::EOperationType type, const TString &parent, const TString& name) {
+        return Sprintf(
+            R"(ModifyScheme {
+                OperationType: %s
+                WorkingDir: "%s"
+                Drop {
+                    Name: "%s"
+                }
+            })",
+            NKikimrSchemeOp::EOperationType_Name(type),
+            parent,
+            name
+        );
+    }
+
+     Ydb::StatusIds::StatusCode TClient::MkDir(const TString& parent, const TString& name /*, const TApplyIf& applyIf */) {
+        return SendModifyScheme(Sprintf(
+            R"(ModifyScheme {
+                OperationType: ESchemeOpMkDir
+                WorkingDir: "%s"
+                MkDir {
+                    Name: "%s"
+                }
+            })",
+            parent,
+            name
+        ));
+    }
+
+    using NKikimrSchemeOp::EOperationType;
+     Ydb::StatusIds::StatusCode TClient::RmDir(const TString& parent, const TString& name/*, const TApplyIf& applyIf*/) {
+        return SendModifyScheme(
+            _DropText(/*NKikimrSchemeOp::EOperationType::*/ESchemeOpRmDir, parent, name)
+        );
+    }
+
+     Ydb::StatusIds::StatusCode TClient::CreateSubdomain(const TString &parent, const TString &description) {
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpCreateSubDomain, parent, "SubDomain", description)
+        );
+    }
+
+     Ydb::StatusIds::StatusCode TClient::CreateSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain) {
+        TString description;
+        ::google::protobuf::TextFormat::PrintToString(subdomain, &description);
+        return CreateSubdomain(parent, description);
+    }
+
+    Ydb::StatusIds::StatusCode TClient::CreateExtSubdomain(const TString &parent, const TString &description) {
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpCreateExtSubDomain, parent, "SubDomain", description)
+        );
+    }
+
+    Ydb::StatusIds::StatusCode TClient::CreateExtSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain) {
+        TString description;
+        ::google::protobuf::TextFormat::PrintToString(subdomain, &description);
+        return CreateExtSubdomain(parent, description);
+    }
+
+    Ydb::StatusIds::StatusCode TClient::AlterUserAttributes(const TString &parent, const TString &name, const TVector<std::pair<TString, TString>>& addAttrs, const TVector<TString>& dropAttrs, const TApplyIf& applyIf) {
+        NKikimrSchemeOp::TAlterUserAttributes userAttributes;
+        {
+            userAttributes->SetPathName(name);
+            for (const auto& item: addAttrs) {
+                auto attr = userAttributes->AddUserAttributes();
+                attr->SetKey(item.first);
+                attr->SetValue(item.second);
+            }
+            for (const auto& item: dropAttrs) {
+                auto attr = userAttributes->AddUserAttributes();
+                attr->SetKey(item);
+            }
         }
-        SetApplyIf(*op, applyIf);
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+
+        TString part1;
+        ::google::protobuf::TextFormat::PrintToString(userAttributes, &part1);
+        TString part2;
+        ::google::protobuf::TextFormat::PrintToString(applyIf, &part2);
+        TString body = Join('\n', part1, part2);
+
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpAlterUserAttributes, parent, "AlterUserAttributes", part1, "ApplyIf", part2)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::AlterSubdomain(const TString &parent, const TString &description, TDuration timeout) {
-        NKikimrSubDomains::TSubDomainSettings subdomain;
-        UNIT_ASSERT(::google::protobuf::TextFormat::ParseFromString(description, &subdomain));
-        return AlterSubdomain(parent, subdomain, timeout);
+    Ydb::StatusIds::StatusCode TClient::AlterSubdomain(const TString &parent, const TString &description, TDuration timeout) {
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpAlterSubDomain, parent, description)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::AlterSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain, TDuration timeout) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterSubDomain);
-        op->SetWorkingDir(parent);
-        op->MutableSubDomain()->CopyFrom(subdomain);
-
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply, timeout);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+    Ydb::StatusIds::StatusCode TClient::AlterSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain, TDuration timeout) {
+        TString description;
+        ::google::protobuf::TextFormat::PrintToString(subdomain, &description);
+        return AlterSubdomain(parent, description, timeout);
     }
 
-    NMsgBusProxy::EResponseStatus TClient::AlterExtSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain, TDuration timeout) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterExtSubDomain);
-        op->SetWorkingDir(parent);
-        op->MutableSubDomain()->CopyFrom(subdomain);
-
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply, timeout);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+    Ydb::StatusIds::StatusCode TClient::AlterExtSubdomain(const TString &parent, const NKikimrSubDomains::TSubDomainSettings &subdomain, TDuration timeout) {
+        TString description;
+        ::google::protobuf::TextFormat::PrintToString(subdomain, &description);
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpAlterExtSubDomain, parent, "SubDomain", description)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::DeleteSubdomain(const TString &parent, const TString &name) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpDropSubDomain);
-        op->SetWorkingDir(parent);
-        op->MutableDrop()->SetName(name);
-
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+    Ydb::StatusIds::StatusCode TClient::DeleteSubdomain(const TString &parent, const TString &name) {
+        return SendModifyScheme(
+            _DropText(NKikimrSchemeOp::EOperationType::ESchemeOpDropSubDomain, parent, name)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::ForceDeleteSubdomain(const TString &parent, const TString &name) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpForceDropSubDomain);
-        op->SetWorkingDir(parent);
-        op->MutableDrop()->SetName(name);
-
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+    Ydb::StatusIds::StatusCode TClient::ForceDeleteSubdomain(const TString &parent, const TString &name) {
+        return SendModifyScheme(
+            _DropText(NKikimrSchemeOp::EOperationType::ESchemeOpForceDropSubDomain, parent, name)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::ForceDeleteUnsafe(const TString &parent, const TString &name) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpForceDropUnsafe);
-        op->SetWorkingDir(parent);
-        op->MutableDrop()->SetName(name);
-
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+    Ydb::StatusIds::StatusCode TClient::ForceDeleteUnsafe(const TString &parent, const TString &name) {
+        return SendModifyScheme(
+            _DropText(NKikimrSchemeOp::EOperationType::ESchemeOpForceDropUnsafe, parent, name)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateUser(const TString& parent, const TString& user, const TString& password) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto* op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterLogin);
-        op->SetWorkingDir(parent);
-
-        auto* createUser = op->MutableAlterLogin()->MutableCreateUser();
-        createUser->SetUser(user);
-        createUser->SetPassword(password);
-
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+    Ydb::StatusIds::StatusCode TClient::CreateUser(const TString& parent, const TString& user, const TString& password) {
+        TString description = Sprintf(R"(
+            {
+                CreateUser {
+                    User: "%s"
+                    Password: "%s"
+                }
+            })",
+            user,
+            password
+        );
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpAlterLogin, parent, "AlterLogin", description)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateTable(const TString& parent, const NKikimrSchemeOp::TTableDescription &table, TDuration timeout) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable);
-        op->SetWorkingDir(parent);
-        op->MutableCreateTable()->CopyFrom(table);
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply, timeout);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+    Ydb::StatusIds::StatusCode TClient::CreateTable(const TString& parent, const NKikimrSchemeOp::TTableDescription &table, TDuration timeout) {
+        TString description;
+        ::google::protobuf::TextFormat::PrintToString(table, &description);
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable, parent, "CreateTable", description)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateTableWithUniformShardedIndex(const TString& parent,
+    Ydb::StatusIds::StatusCode TClient::CreateTableWithUniformShardedIndex(const TString& parent,
         const NKikimrSchemeOp::TTableDescription &table, const TString& indexName, const TVector<TString> indexColumns,
         NKikimrSchemeOp::EIndexType type, const TVector<TString> dataColumns, TDuration timeout)
     {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpCreateIndexedTable);
-        op->SetWorkingDir(parent);
-
-        NKikimrSchemeOp::TTableDescription* tableDesc = op->MutableCreateIndexedTable()->MutableTableDescription();
-        tableDesc->CopyFrom(table);
+        NKikimrSchemeOp::TIndexedTableCreationConfig indexedTable;
+        indexedTable.MutableTableDescription()->CopyFrom(table);
 
         {
-            auto indexDesc = op->MutableCreateIndexedTable()->MutableIndexDescription()->Add();
+            auto indexDesc = indexedTable->MutableIndexDescription()->Add();
             indexDesc->SetName(indexName);
             for (const auto& c : indexColumns) {
                 indexDesc->AddKeyColumnNames(c);
@@ -1675,37 +1672,34 @@ namespace Tests {
             indexDesc->MutableIndexImplTableDescription()->SetUniformPartitionsCount(16);
         }
 
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply, timeout);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+        TString description;
+        ::google::protobuf::TextFormat::PrintToString(indexedTable, &description);
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpCreateIndexedTable, parent, "CreateIndexedTable", description)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::SplitTable(const TString& table, ui64 datashardId, ui64 border, TDuration timeout) {
-        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
-        auto op = request->Record.MutableTransaction()->MutableModifyScheme();
-        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpSplitMergeTablePartitions);
-        auto split = op->MutableSplitMergeTablePartitions();
-        split->SetTablePath(table);
-        split->AddSourceTabletId(datashardId);
-        split->AddSplitBoundary()->MutableKeyPrefix()->AddTuple()->MutableOptional()->SetUint64(border);
+    Ydb::StatusIds::StatusCode TClient::SplitTable(const TString& table, ui64 datashardId, ui64 border, TDuration timeout) {
+        NKikimrSchemeOp::TSplitMergeTablePartitions split;
+        split.SetTablePath(table);
+        split.AddSourceTabletId(datashardId);
+        split.AddSplitBoundary()->MutableKeyPrefix()->AddTuple()->MutableOptional()->SetUint64(border);
 
-        TAutoPtr<NBus::TBusMessage> reply;
-        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply, timeout);
-        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
-        const NKikimrClient::TResponse &response = dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Get())->Record;
-        return (NMsgBusProxy::EResponseStatus)response.GetStatus();
+        TString description;
+        ::google::protobuf::TextFormat::PrintToString(split, &description);
+        return SendModifyScheme(
+            _DescriptionText(NKikimrSchemeOp::EOperationType::ESchemeOpSplitMergeTablePartitions, parent, "SplitMergeTablePartitions", description)
+        );
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CopyTable(const TString &parent, const TString &name, const TString &src) {
+    Ydb::StatusIds::StatusCode TClient::CopyTable(const TString &parent, const TString &name, const TString &src) {
         NKikimrSchemeOp::TTableDescription table;
         table.SetName(name);
         table.SetCopyFromTable(src);
         return CreateTable(parent, table, TDuration::Seconds(5000));
     }
 
-    NMsgBusProxy::EResponseStatus TClient::ConsistentCopyTables(TVector<std::pair<TString, TString>> desc, TDuration timeout) {
+    Ydb::StatusIds::StatusCode TClient::ConsistentCopyTables(TVector<std::pair<TString, TString>> desc, TDuration timeout) {
         NKikimrSchemeOp::TConsistentTableCopyingConfig coping;
         for (auto& task: desc) {
             auto* item = coping.AddCopyTableDescriptions();
@@ -1725,14 +1719,14 @@ namespace Tests {
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateTable(const TString& parent, const TString& scheme, TDuration timeout) {
+    Ydb::StatusIds::StatusCode TClient::CreateTable(const TString& parent, const TString& scheme, TDuration timeout) {
         NKikimrSchemeOp::TTableDescription table;
         bool parseOk = ::google::protobuf::TextFormat::ParseFromString(scheme, &table);
         UNIT_ASSERT(parseOk);
         return CreateTable(parent, table, timeout);
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateKesus(const TString& parent, const TString& name) {
+    Ydb::StatusIds::StatusCode TClient::CreateKesus(const TString& parent, const TString& name) {
         auto* request = new NMsgBusProxy::TBusSchemeOperation();
         auto* tx = request->Record.MutableTransaction()->MutableModifyScheme();
         tx->SetOperationType(NKikimrSchemeOp::ESchemeOpCreateKesus);
@@ -1745,7 +1739,7 @@ namespace Tests {
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::DeleteKesus(const TString& parent, const TString& name) {
+    Ydb::StatusIds::StatusCode TClient::DeleteKesus(const TString& parent, const TString& name) {
         auto* request = new NMsgBusProxy::TBusSchemeOperation();
         auto* tx = request->Record.MutableTransaction()->MutableModifyScheme();
         tx->SetOperationType(NKikimrSchemeOp::ESchemeOpDropKesus);
@@ -1758,14 +1752,14 @@ namespace Tests {
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateOlapStore(const TString& parent, const TString& scheme) {
+    Ydb::StatusIds::StatusCode TClient::CreateOlapStore(const TString& parent, const TString& scheme) {
         NKikimrSchemeOp::TColumnStoreDescription store;
         bool parseOk = ::google::protobuf::TextFormat::ParseFromString(scheme, &store);
         UNIT_ASSERT(parseOk);
         return CreateOlapStore(parent, store);
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateOlapStore(const TString& parent,
+    Ydb::StatusIds::StatusCode TClient::CreateOlapStore(const TString& parent,
                                                            const NKikimrSchemeOp::TColumnStoreDescription& store) {
         auto request = std::make_unique<NMsgBusProxy::TBusSchemeOperation>();
         auto* op = request->Record.MutableTransaction()->MutableModifyScheme();
@@ -1779,14 +1773,14 @@ namespace Tests {
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateColumnTable(const TString& parent, const TString& scheme) {
+    Ydb::StatusIds::StatusCode TClient::CreateColumnTable(const TString& parent, const TString& scheme) {
         NKikimrSchemeOp::TColumnTableDescription table;
         bool parseOk = ::google::protobuf::TextFormat::ParseFromString(scheme, &table);
         UNIT_ASSERT(parseOk);
         return CreateColumnTable(parent, table);
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateColumnTable(const TString& parent,
+    Ydb::StatusIds::StatusCode TClient::CreateColumnTable(const TString& parent,
                                                            const NKikimrSchemeOp::TColumnTableDescription& table) {
         auto request = std::make_unique<NMsgBusProxy::TBusSchemeOperation>();
         auto* op = request->Record.MutableTransaction()->MutableModifyScheme();
@@ -1800,7 +1794,7 @@ namespace Tests {
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateSolomon(const TString& parent, const TString& name, ui32 parts, ui32 channelProfile) {
+    Ydb::StatusIds::StatusCode TClient::CreateSolomon(const TString& parent, const TString& name, ui32 parts, ui32 channelProfile) {
         auto* request = new NMsgBusProxy::TBusSchemeOperation();
         auto* tx = request->Record.MutableTransaction()->MutableModifyScheme();
         tx->SetOperationType(NKikimrSchemeOp::ESchemeOpCreateSolomonVolume);
@@ -1855,20 +1849,20 @@ namespace Tests {
         return AlterTable(parent, table, userToken);
     }
 
-    NMsgBusProxy::EResponseStatus TClient::AlterTable(const TString& parent, const NKikimrSchemeOp::TTableDescription& alter) {
+    Ydb::StatusIds::StatusCode TClient::AlterTable(const TString& parent, const NKikimrSchemeOp::TTableDescription& alter) {
         TAutoPtr<NMsgBusProxy::TBusResponse> reply = AlterTable(parent, alter, TString());
         const NKikimrClient::TResponse &response = reply->Record;
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::AlterTable(const TString& parent, const TString& alter) {
+    Ydb::StatusIds::StatusCode TClient::AlterTable(const TString& parent, const TString& alter) {
         NKikimrSchemeOp::TTableDescription table;
         bool parseOk = ::google::protobuf::TextFormat::ParseFromString(alter, &table);
         UNIT_ASSERT(parseOk);
         return AlterTable(parent, table);
     }
 
-    NMsgBusProxy::EResponseStatus TClient::StoreTableBackup(const TString& parent, const NKikimrSchemeOp::TBackupTask& task) {
+    Ydb::StatusIds::StatusCode TClient::StoreTableBackup(const TString& parent, const NKikimrSchemeOp::TBackupTask& task) {
         TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
         auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
         op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpBackup);
@@ -1881,7 +1875,7 @@ namespace Tests {
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::DeleteTable(const TString& parent, const TString& name) {
+    Ydb::StatusIds::StatusCode TClient::DeleteTable(const TString& parent, const TString& name) {
         TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
         auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
         op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpDropTable);
@@ -1894,7 +1888,7 @@ namespace Tests {
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::DeleteTopic(const TString& parent, const TString& name) {
+    Ydb::StatusIds::StatusCode TClient::DeleteTopic(const TString& parent, const TString& name) {
         TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
         auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
         op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup);
@@ -1921,7 +1915,7 @@ namespace Tests {
         return res;
     }
 
-    NMsgBusProxy::EResponseStatus TClient::WaitCreateTx(TTestActorRuntime* runtime, const TString& path, TDuration timeout) {
+    Ydb::StatusIds::StatusCode TClient::WaitCreateTx(TTestActorRuntime* runtime, const TString& path, TDuration timeout) {
         TAutoPtr<NSchemeShard::TEvSchemeShard::TEvDescribeScheme> request(new NSchemeShard::TEvSchemeShard::TEvDescribeScheme());
         request->Record.SetPath(path);
         const ui64 schemeRoot = GetPatchedSchemeRoot(SchemeRoot, Domain, SupportsRedirect);
@@ -2541,7 +2535,7 @@ namespace Tests {
         return describeResult->Record.GetPathDescription().GetKesus().GetKesusTabletId();
     }
 
-    Ydb::StatusIds::StatusCode TClient::AddQuoterResource(TTestActorRuntime* runtime, const TString& kesusPath, const TString& resourcePath, const TMaybe<double> maxUnitsPerSecond) {
+     Ydb::StatusIds::StatusCode TClient::AddQuoterResource(TTestActorRuntime* runtime, const TString& kesusPath, const TString& resourcePath, const TMaybe<double> maxUnitsPerSecond) {
         NKikimrKesus::THierarchicalDRRResourceConfig cfg;
         if (maxUnitsPerSecond) {
             cfg.SetMaxUnitsPerSecond(*maxUnitsPerSecond);
@@ -2549,7 +2543,7 @@ namespace Tests {
         return AddQuoterResource(runtime, kesusPath, resourcePath, cfg);
     }
 
-    Ydb::StatusIds::StatusCode TClient::AddQuoterResource(TTestActorRuntime* runtime, const TString& kesusPath, const TString& resourcePath, const NKikimrKesus::THierarchicalDRRResourceConfig& props) {
+     Ydb::StatusIds::StatusCode TClient::AddQuoterResource(TTestActorRuntime* runtime, const TString& kesusPath, const TString& resourcePath, const NKikimrKesus::THierarchicalDRRResourceConfig& props) {
         THolder<NKesus::TEvKesus::TEvAddQuoterResource> request = MakeHolder<NKesus::TEvKesus::TEvAddQuoterResource>();
         request->Record.MutableResource()->SetResourcePath(resourcePath);
         *request->Record.MutableResource()->MutableHierarchicalDRRResourceConfig() = props;

@@ -518,7 +518,7 @@ void TMessageBusServer::OnMessage(TBusMessageContext &msg) {
     case MTYPE_CLIENT_OLD_KEYVALUE:
         return ClientActorRequest(CreateMessageBusKeyValue, msg);
     case MTYPE_CLIENT_PERSQUEUE:
-        return ClientProxyRequest<TEvBusProxy::TEvPersQueue>(msg);
+        return ClientProxyRequest<TEvBusProxy::NEvPersQueue>(msg);
     case MTYPE_CLIENT_CHOOSE_PROXY:
         return ClientActorRequest(CreateMessageBusChooseProxy, msg);
     case MTYPE_CLIENT_TABLET_STATE_REQUEST:

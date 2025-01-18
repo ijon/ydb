@@ -44,3 +44,9 @@
 /ydb/core/formats/arrow @ydb-platform/cs
 /ydb/core/tx/columnshard @ydb-platform/cs
 
+/ydb/core/tx/schemeshard @ijon @CyberROFL @snaury
+/ydb/core/protos/schemeshard @ijon @CyberROFL @snaury
+/ydb/core/protos/flat_*scheme*.proto @ijon @CyberROFL @snaury
+
+/ydb/core/mind/hive @vporyadke @adameat @ijon
+/ydb/core/protos/hive.proto @vporyadke @adameat @ijon
